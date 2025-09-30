@@ -16,7 +16,7 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
     default_base = Path(__file__).resolve().parent.parent
     home = Path(base_path) if base_path else default_base
     results, q = [], query.lower()
-    WHITELIST_EXTS = {'.py', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h', '.go', '.cs', '.java', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.html', '.rs', '.md'}
+    WHITELIST_EXTS = {'.py', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h', '.go', '.cs', '.java', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.html', '.rs', '.md', '.sql'}
     try:
         for item in home.rglob('*'):
             if len(results) >= max_results: break
