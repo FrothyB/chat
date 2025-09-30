@@ -236,7 +236,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
             ui.run_javascript(f'stopAnswerTimer("{t["answer_id"]}")')
         try:
             if t.get('markdown') is not None and full_text is not None:
-                t['markdown'].content = full_text
+                t['markdown'].content = balance_fences(full_text)
                 ui.run_javascript("setTimeout(addCopyButtons, 50)")
         except Exception:
             pass

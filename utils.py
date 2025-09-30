@@ -8,7 +8,7 @@ from stuff import *
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-5"
-MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-sonnet-4", "x-ai/grok-code-fast-1", "x-ai/grok-4-fast"]
+MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 10) -> List[str]:
@@ -16,7 +16,7 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
     default_base = Path(__file__).resolve().parent.parent
     home = Path(base_path) if base_path else default_base
     results, q = [], query.lower()
-    WHITELIST_EXTS = {'.py', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h', '.go', '.cs', '.java', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.rs'}
+    WHITELIST_EXTS = {'.py', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h', '.go', '.cs', '.java', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.html', '.rs', '.md'}
     try:
         for item in home.rglob('*'):
             if len(results) >= max_results: break
@@ -90,7 +90,7 @@ async def _iter_sse_lines(resp: ClientResponse):
                 line = raw.decode('utf-8', errors='ignore').rstrip('\r')
                 if line == '':
                     payload = await dispatch()
-                    if payload is not None: yield payload
+                    if payload not in (None, ''): yield payload
                     continue
                 if line.startswith(':'): continue
                 if ':' in line:
@@ -108,7 +108,7 @@ async def _iter_sse_lines(resp: ClientResponse):
                     field, value = line, ''
                 if field == 'data': data_lines.append(value)
         payload = await dispatch()
-        if payload is not None: yield payload
+        if payload not in (None, ''): yield payload
     except (asyncio.CancelledError, GeneratorExit):
         raise
 
@@ -117,7 +117,7 @@ class ChatClient:
         self.messages = [{"role": "system", "content": CHAT_PROMPT}]
         self.files: List[str] = []
         self.message_files: Dict[int, List[str]] = {}
-        self.headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+        self.headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json", "Accept": "text/event-stream"}
         self.edited_files: Dict[str, EditFile] = {}
 
     async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = "minimal"):
@@ -128,7 +128,7 @@ class ChatClient:
         self.files = []
         assistant_index = len(self.messages)
         self.messages.append({"role": "assistant", "content": ""})
-        data = {"model": model, "messages": self.messages, "max_tokens": 50000, "temperature": 0.2, "stream": True}
+        data = {"model": model, "messages": self.messages[:-1], "max_tokens": 50000, "temperature": 0.2, "stream": True}
         if reasoning != "none":
             key = "effort" if ('openai' in model or 'x-ai' in model) else "max_tokens"
             data["reasoning"] = {key: reasoning if key == "effort" else REASONING_LEVELS[reasoning]}
@@ -140,7 +140,8 @@ class ChatClient:
                 async with session.post(f"{BASE_URL}/chat/completions", headers=self.headers, json=data) as resp:
                     if resp.status != 200: raise Exception(f"API error: {await resp.text()}")
                     async for payload in _iter_sse_lines(resp):
-                        if not payload or payload == '[DONE]': break
+                        if not payload: continue
+                        if payload.strip() == '[DONE]': break
                         with contextlib.suppress(Exception):
                             obj = json.loads(payload)
                             choice = (obj.get('choices') or [{}])[0]

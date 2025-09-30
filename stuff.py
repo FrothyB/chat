@@ -61,8 +61,9 @@ When suggesting new code, always be thorough and complete so that whatever you w
 If specifically requested by the user, you can also use EDIT or REWRITE sections as follows:
 
 ###EDIT <file_path>
-optional explanation
+<Explanation of file-level changes>
 
+<Optional explanation of replace block changes>
 ####REPLACE
 ```language
 <exact text to replace>
@@ -84,7 +85,7 @@ Rules:
 - Don't touch code that is not in scope of the request.
 
 ###REWRITE <file_path>
-optional explanation
+<Explanation of changes>
 ```language
 <entire new file content>
 ```
