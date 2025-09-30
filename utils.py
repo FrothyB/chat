@@ -37,9 +37,9 @@ def read_files(file_paths: List[str]) -> str:
         name = Path(path).name
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                contents.append(f"=== {name} ===\n{f.read()}\n")
+                contents.append(f"### {name}\n{f.read()}\n")
         except Exception as e:
-            contents.append(f"=== {name} ===\nError: {e}\n")
+            contents.append(f"### {name} \nError: {e}\n")
     return '\n'.join(contents)
 
 @dataclass

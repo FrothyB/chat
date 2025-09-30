@@ -206,6 +206,10 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
             tclose['streaming'] = False
             if 'stream' in tclose and hasattr(tclose['stream'], 'aclose'):
                 asyncio.create_task(tclose['stream'].aclose())
+            for k in ('producer_task', 'consumer_task'):
+                task = tclose.pop(k, None)
+                if task: task.cancel()
+            tclose.pop('queue', None)
             clear_runtime(tclose)
         c = tclose.get('container')
         if c: c.delete()
@@ -232,6 +236,11 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         t = tab_obj or tab()
         t['streaming'] = False
         t.pop('stream', None)
+        # cleanup any background tasks/queues
+        for k in ('producer_task', 'consumer_task', 'queue'):
+            v = t.pop(k, None)
+            with contextlib.suppress(Exception):
+                v.cancel() if hasattr(v, 'cancel') else None
         if t.get('answer_id'):
             ui.run_javascript(f'stopAnswerTimer("{t["answer_id"]}")')
         try:
@@ -271,38 +280,86 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
             ui.run_javascript(f'setTimeout(()=>startAnswerTimer("{t["answer_id"]}"),0)')
         t['streaming'] = True; t['reasoning_buffer'] = ''; update_footer_visibility()
 
-        parts, completed = [], False
+        q: asyncio.Queue = asyncio.Queue(maxsize=2048)
+        t['queue'] = q
+
         stream = t['chat'].stream_message(message_to_send, model_select.value, reasoning_select.value)
         t['stream'] = stream
 
-        try:
-            last_update, tick = 0.0, 0.1
-            async for chunk in stream:
-                if not t.get('streaming'):
-                    with contextlib.suppress(Exception):
-                        if hasattr(stream, 'aclose'): await stream.aclose()
-                    break
-                if isinstance(chunk, ReasoningEvent):
-                    update_reasoning(chunk.text, tab_obj=t); continue
+        completed, full = False, ""
 
-                parts.append(chunk)
-                if t.get('markdown'):
-                    now = time.monotonic()
-                    if (now - last_update) >= tick:
-                        text = balance_fences(''.join(parts))
-                        t['markdown'].content = text
-                        last_update = now
-            else:
-                completed = True
-                scroll_bottom()
-        except Exception as e:
-            ui.notify(f'Error: {e}', type='negative')
+        async def _safe_put(item):
+            q.put_nowait(item)  # may raise asyncio.QueueFull
+
+        async def producer():
+            nonlocal completed
+            try:
+                async for chunk in stream:
+                    if not t.get('streaming'): break
+                    if isinstance(chunk, ReasoningEvent):
+                        await _safe_put(('reasoning', chunk.text)); continue
+                    await _safe_put(('text', chunk))
+                else:
+                    completed = True
+            except Exception as e:
+                raise
+            finally:
+                with contextlib.suppress(Exception):
+                    if hasattr(stream, 'aclose'): await stream.aclose()
+                with contextlib.suppress(Exception):
+                    await _safe_put(('done', None))
+
+        async def consumer():
+            nonlocal full
+            md = t.get('markdown')
+            last_update, tick = 0.0, 0.08
+            tail2, parity, done = '', 0, False
+            reasoning_buf = ''
+            while not done or not q.empty():
+                drained = False
+                while True:
+                    try:
+                        kind, payload = q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if kind == 'text':
+                        full += payload
+                        scan = tail2 + payload
+                        c = scan.count('```')
+                        if c & 1: parity ^= 1
+                        tail2 = scan[-2:] if len(scan) >= 2 else scan
+                        drained = True
+                    elif kind == 'reasoning':
+                        reasoning_buf += payload
+                    elif kind == 'error':
+                        ui.notify(f"Error: {payload}", type='negative')
+                    elif kind == 'done':
+                        done = True
+                if reasoning_buf:
+                    update_reasoning(reasoning_buf, tab_obj=t)
+                    reasoning_buf = ''
+                now = time.monotonic()
+                if md and drained and (now - last_update) >= tick:
+                    md.content = full + ('\n```' if (parity & 1) else '')
+                    last_update = now
+                await asyncio.sleep(0.03)
+            if md:
+                md.content = full + ('\n```' if (parity & 1) else '')
+
+        t['producer_task'] = asyncio.create_task(producer())
+        t['consumer_task'] = asyncio.create_task(consumer())
+
+        try:
+            await t['producer_task']
+            await t['consumer_task']
+        except asyncio.CancelledError:
+            pass
         finally:
-            full = ''.join(parts)
             finish_stream(full, tab_obj=t)
         if completed:
+            scroll_bottom()
             await apply_edits_from_response(full, tab_obj=t)
-
+            
     def stop_streaming():
         t = tab()
         if not t.get('streaming'):
@@ -310,6 +367,10 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         t['streaming'] = False
         if 'stream' in t and hasattr(t['stream'], 'aclose'):
             asyncio.create_task(t['stream'].aclose())
+        for k in ('producer_task', 'consumer_task'):
+            task = t.pop(k, None)
+            if task: task.cancel()
+        t.pop('queue', None)
         t.pop('stream', None)
         clear_runtime(t)
         update_footer_visibility()
