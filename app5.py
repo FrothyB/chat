@@ -67,11 +67,9 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
 
     def clear_runtime(tab_obj=None):
         t = tab_obj or tab()
-        if t.get('reasoning_label'):
-            t['reasoning_label'].text = ''
         if t.get('answer_id'):
             ui.run_javascript(f'stopAnswerTimer("{t["answer_id"]}")')
-        for k in ('markdown','answer_id','reasoning_label','reasoning_buffer','reasoning_last_update'):
+        for k in ('markdown','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode'):
             t.pop(k, None)
 
     def balance_fences(s: str) -> str:
@@ -80,15 +78,14 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
     def update_reasoning(text: str | None, tab_obj=None):
         if not text: return
         t = tab_obj or tab()
-        if not t.get('reasoning_label'): return
-        buf = (t.get('reasoning_buffer') or '') + text
-        t['reasoning_buffer'] = buf
+        if not t.get('reasoning_mode'): return
+        t['reasoning_buffer'] = (t.get('reasoning_buffer') or '') + text
+        md = t.get('markdown')
+        if not md: return
         now = time.monotonic()
         last_ts = t.get('reasoning_last_update') or 0.0
-        if (now - last_ts) < 0.1: return
-        last = buf.split('\n')[-1]
-        if len(last) > 100: last = last[:100] + '...'
-        t['reasoning_label'].text = last
+        if (now - last_ts) < 0.08: return
+        md.content = balance_fences(t['reasoning_buffer'])
         t['reasoning_last_update'] = now
 
     def build_tools(target_id: str, with_timer: bool = False, get_text=None):
@@ -120,9 +117,6 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
                 is_stream = (content == '')
                 with ui.element('div').classes('flex justify-start mb-3'):
                     with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble').props(f'id={aid}'):
-                        label = ui.label('').classes('reasoning-line')
-                        if is_stream:
-                            t['reasoning_label'] = label
                         md = ui.markdown(content).props('data-md=answer').classes(MD_ANS)
                         if is_stream:
                             t['answer_id'] = aid; t['markdown'] = md
@@ -244,12 +238,12 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         if t.get('answer_id'):
             ui.run_javascript(f'stopAnswerTimer("{t["answer_id"]}")')
         try:
-            if t.get('markdown') is not None and full_text is not None:
+            if t.get('markdown') is not None and full_text is not None and not t.get('reasoning_mode'):
                 t['markdown'].content = balance_fences(full_text)
                 ui.run_javascript("setTimeout(addCopyButtons, 50)")
         except Exception:
             pass
-        for k in ('markdown','answer_id','reasoning_label','reasoning_buffer'):
+        for k in ('markdown','answer_id','reasoning_buffer','reasoning_mode'):
             t.pop(k, None)
         update_footer_visibility()
 
@@ -278,7 +272,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         show_message('assistant', '')
         if t.get('answer_id'):
             ui.run_javascript(f'setTimeout(()=>startAnswerTimer("{t["answer_id"]}"),0)')
-        t['streaming'] = True; t['reasoning_buffer'] = ''; update_footer_visibility()
+        t['streaming'] = True; t['reasoning_mode'] = True; t['reasoning_buffer'] = ''; update_footer_visibility()
 
         q: asyncio.Queue = asyncio.Queue(maxsize=2048)
         t['queue'] = q
@@ -315,6 +309,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
             last_update, tick = 0.0, 0.08
             tail2, parity, done = '', 0, False
             reasoning_buf = ''
+            in_reasoning = t.get('reasoning_mode', False)
             while not done or not q.empty():
                 drained = False
                 while True:
@@ -323,6 +318,10 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
                     except asyncio.QueueEmpty:
                         break
                     if kind == 'text':
+                        if in_reasoning:
+                            in_reasoning = False; t['reasoning_mode'] = False; t['reasoning_buffer'] = ''
+                            if md: md.content = ''
+                            last_update, tail2, parity = 0.0, '', 0
                         full += payload
                         scan = tail2 + payload
                         c = scan.count('```')
