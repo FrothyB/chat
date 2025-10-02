@@ -1,4 +1,4 @@
-import asyncio, contextlib, time, json, argparse
+import asyncio, contextlib, time, json, argparse, re
 from pathlib import Path
 from nicegui import ui
 from utils import ChatClient, search_files, STYLE_CSS, MODELS, REASONING_LEVELS, DEFAULT_MODEL, EXTRACT_ADD_ON, ReasoningEvent
@@ -9,7 +9,6 @@ async def main_page():
     tabs = [{'name': 'Chat 1', 'chat': ChatClient(), 'edit_history': [], 'streaming': False}]
     state = {'active_tab': 0, 'answer_counter': 0, 'msg_counter': 0, 'file_results': [], 'file_idx': -1}
 
-    # CSS/JS
     ui.add_head_html(STYLE_CSS + r"""
 <script>
 window._writeText=async t=>{
@@ -38,8 +37,9 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
 
     # Small helpers and shared strings
     P = 'dark outlined dense color=white'
-    MD_USER = 'prose prose-sm md-literal-underscores max-w-none text-white break-words prose-pre:bg-transparent prose-pre:text-white prose-pre:whitespace-pre-wrap prose-code:whitespace-pre-wrap'
-    MD_ANS  = 'prose prose-sm md-literal-underscores max-w-none text-gray-200 break-words prose-p:m-0 prose-pre:bg-transparent prose-pre:whitespace-pre-wrap prose-code:whitespace-pre-wrap'
+    MD_EXTRAS = ['break-on-newline', 'fenced-code-blocks','tables','cuddled-lists','mermaid','latex','code-friendly']
+    MD_USER = 'prose prose-sm max-w-none break-words'
+    MD_ANS  = MD_USER
 
     back_button = None
     stop_button = None
@@ -72,9 +72,6 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         for k in ('markdown','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode'):
             t.pop(k, None)
 
-    def balance_fences(s: str) -> str:
-        return s + ('\n```' if s.count('```') % 2 == 1 else '')
-
     def update_reasoning(text: str | None, tab_obj=None):
         if not text: return
         t = tab_obj or tab()
@@ -85,7 +82,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         now = time.monotonic()
         last_ts = t.get('reasoning_last_update') or 0.0
         if (now - last_ts) < 0.08: return
-        md.content = balance_fences(t['reasoning_buffer'])
+        md.content = t['reasoning_buffer']
         t['reasoning_last_update'] = now
 
     def build_tools(target_id: str, with_timer: bool = False, get_text=None):
@@ -108,7 +105,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
                 uid = f'user-{state["msg_counter"]}'
                 with ui.element('div').classes('flex justify-end mb-3'):
                     with ui.element('div').classes('inline-block bg-blue-600 rounded-lg px-3 py-2 max-w-full min-w-0 user-bubble').props(f'id={uid}'):
-                        ui.markdown(content).classes(MD_USER)
+                        ui.markdown(content, extras=MD_EXTRAS).classes(MD_USER)
                 with ui.element('div').classes('flex justify-end mt-1'):
                     build_tools(uid, get_text=lambda c=content: c)
             else:
@@ -117,7 +114,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
                 is_stream = (content == '')
                 with ui.element('div').classes('flex justify-start mb-3'):
                     with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble').props(f'id={aid}'):
-                        md = ui.markdown(content).props('data-md=answer').classes(MD_ANS)
+                        md = ui.markdown(content, extras=MD_EXTRAS).classes(MD_ANS)
                         if is_stream:
                             t['answer_id'] = aid; t['markdown'] = md
                         if not is_stream: ui.run_javascript("setTimeout(addCopyButtons, 50)")
@@ -238,8 +235,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         if t.get('answer_id'):
             ui.run_javascript(f'stopAnswerTimer("{t["answer_id"]}")')
         try:
-            if t.get('markdown') is not None and full_text is not None and not t.get('reasoning_mode'):
-                t['markdown'].content = balance_fences(full_text)
+            if t.get('markdown') is not None and not t.get('reasoning_mode'):
                 ui.run_javascript("setTimeout(addCopyButtons, 50)")
         except Exception:
             pass
@@ -261,7 +257,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
             ui.notify(f'Edit error: {e}', type='negative')
 
     async def send():
-        msg = input_field.value.strip().replace('\n', '\n\n')
+        msg = input_field.value.strip()
         t = tab()
         if t.get('streaming') or not msg: return
         mode = mode_select.value
@@ -307,9 +303,22 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
             nonlocal full
             md = t.get('markdown')
             last_update, tick = 0.0, 0.08
-            tail2, parity, done = '', 0, False
-            reasoning_buf = ''
-            in_reasoning = t.get('reasoning_mode', False)
+            reasoning_buf, in_reasoning, done = '', t.get('reasoning_mode', False), False
+            fence_count, tail_bt = 0, ''
+
+            def update_fences(chunk: str):
+                nonlocal fence_count, tail_bt
+                scan = (tail_bt + chunk) if chunk else tail_bt
+                if scan:
+                    fence_count += scan.count('```')
+                    i, c = len(scan) - 1, 0
+                    while i >= 0 and scan[i] == '`' and c < 2:
+                        c += 1; i -= 1
+                    tail_bt = '`' * c
+
+            def render_stream() -> str:
+                return full + ('\n```' if (fence_count & 1) else '')
+
             while not done or not q.empty():
                 drained = False
                 while True:
@@ -320,14 +329,10 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
                     if kind == 'text':
                         if in_reasoning:
                             in_reasoning = False; t['reasoning_mode'] = False; t['reasoning_buffer'] = ''
+                            fence_count, tail_bt = 0, ''
                             if md: md.content = ''
-                            last_update, tail2, parity = 0.0, '', 0
-                        full += payload
-                        scan = tail2 + payload
-                        c = scan.count('```')
-                        if c & 1: parity ^= 1
-                        tail2 = scan[-2:] if len(scan) >= 2 else scan
-                        drained = True
+                            last_update = 0.0
+                        full += payload; update_fences(payload); drained = True
                     elif kind == 'reasoning':
                         reasoning_buf += payload
                     elif kind == 'error':
@@ -335,15 +340,12 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
                     elif kind == 'done':
                         done = True
                 if reasoning_buf:
-                    update_reasoning(reasoning_buf, tab_obj=t)
-                    reasoning_buf = ''
+                    update_reasoning(reasoning_buf, tab_obj=t); reasoning_buf = ''
                 now = time.monotonic()
                 if md and drained and (now - last_update) >= tick:
-                    md.content = full + ('\n```' if (parity & 1) else '')
-                    last_update = now
+                    md.content = render_stream(); last_update = now
                 await asyncio.sleep(0.03)
-            if md:
-                md.content = full + ('\n```' if (parity & 1) else '')
+            if md: md.content = render_stream()
 
         t['producer_task'] = asyncio.create_task(producer())
         t['consumer_task'] = asyncio.create_task(consumer())
