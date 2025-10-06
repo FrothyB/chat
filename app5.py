@@ -1,6 +1,6 @@
 import asyncio, contextlib, time, json, argparse, re
 from pathlib import Path
-from nicegui import ui
+from nicegui import app, ui
 from utils import ChatClient, search_files, STYLE_CSS, MODELS, REASONING_LEVELS, DEFAULT_MODEL, EXTRACT_ADD_ON, ReasoningEvent
 
 @ui.page('/')
@@ -64,13 +64,6 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
             c = t.get('container')
             if not c: continue
             c.style('display:none' if i != state['active_tab'] else 'display:flex')
-
-    def clear_runtime(tab_obj=None):
-        t = tab_obj or tab()
-        if t.get('answer_id'):
-            ui.run_javascript(f'stopAnswerTimer("{t["answer_id"]}")')
-        for k in ('markdown','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode'):
-            t.pop(k, None)
 
     def update_reasoning(text: str | None, tab_obj=None):
         if not text: return
@@ -194,14 +187,9 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         if len(tabs) == 1: ui.notify('Cannot close last tab', type='warning'); return
         tclose = tabs[index]
         if tclose.get('streaming'):
-            tclose['streaming'] = False
-            if 'stream' in tclose and hasattr(tclose['stream'], 'aclose'):
-                asyncio.create_task(tclose['stream'].aclose())
-            for k in ('producer_task', 'consumer_task'):
-                task = tclose.pop(k, None)
-                if task: task.cancel()
-            tclose.pop('queue', None)
-            clear_runtime(tclose)
+            md = tclose.get('markdown')
+            current = '' if tclose.get('reasoning_mode') else ((md.content or '') if md else '')
+            finish_stream(current or 'Response stopped.', tab_obj=tclose)
         c = tclose.get('container')
         if c: c.delete()
         tabs.pop(index)
@@ -225,21 +213,39 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
 
     def finish_stream(full_text: str, tab_obj=None):
         t = tab_obj or tab()
+        md = t.get('markdown')
+        # Prefer concrete streamed text; fall back to current rendered content (non-reasoning), else nothing
+        fallback = (full_text or '').rstrip()
+        if not fallback and md is not None and not t.get('reasoning_mode'):
+            fallback = (md.content or '').rstrip()
+
+        # Ensure the assistant placeholder in history is never left empty
+        try:
+            t['chat'].ensure_last_assistant_nonempty(fallback or '')
+        except Exception:
+            pass
+
+        # If no text was ever streamed (non-reasoning), show the fallback in the live bubble too
+        if md is not None and not t.get('reasoning_mode'):
+            if (md.content or '').strip() == '' and fallback:
+                md.content = fallback
+
         t['streaming'] = False
-        t.pop('stream', None)
         # cleanup any background tasks/queues
         for k in ('producer_task', 'consumer_task', 'queue'):
             v = t.pop(k, None)
             with contextlib.suppress(Exception):
                 v.cancel() if hasattr(v, 'cancel') else None
+        t.pop('stream', None)
+
         if t.get('answer_id'):
             ui.run_javascript(f'stopAnswerTimer("{t["answer_id"]}")')
         try:
-            if t.get('markdown') is not None and not t.get('reasoning_mode'):
+            if md is not None and not t.get('reasoning_mode'):
                 ui.run_javascript("setTimeout(addCopyButtons, 50)")
         except Exception:
             pass
-        for k in ('markdown','answer_id','reasoning_buffer','reasoning_mode'):
+        for k in ('markdown','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode'):
             t.pop(k, None)
         update_footer_visibility()
 
@@ -270,7 +276,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
             ui.run_javascript(f'setTimeout(()=>startAnswerTimer("{t["answer_id"]}"),0)')
         t['streaming'] = True; t['reasoning_mode'] = True; t['reasoning_buffer'] = ''; update_footer_visibility()
 
-        q: asyncio.Queue = asyncio.Queue(maxsize=2048)
+        q: asyncio.Queue = asyncio.Queue()
         t['queue'] = q
 
         stream = t['chat'].stream_message(message_to_send, model_select.value, reasoning_select.value)
@@ -279,7 +285,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         completed, full = False, ""
 
         async def _safe_put(item):
-            q.put_nowait(item)  # may raise asyncio.QueueFull
+            await q.put(item)
 
         async def producer():
             nonlocal completed
@@ -365,16 +371,11 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
         t = tab()
         if not t.get('streaming'):
             ui.notify('No active response to stop', type='warning'); return
+        md = t.get('markdown')
+        current = '' if t.get('reasoning_mode') else ((md.content or '') if md else '')
         t['streaming'] = False
-        if 'stream' in t and hasattr(t['stream'], 'aclose'):
-            asyncio.create_task(t['stream'].aclose())
-        for k in ('producer_task', 'consumer_task'):
-            task = t.pop(k, None)
-            if task: task.cancel()
-        t.pop('queue', None)
-        t.pop('stream', None)
-        clear_runtime(t)
-        update_footer_visibility()
+        # Finalize UI and history; finish_stream will cancel tasks/stream and clean state
+        finish_stream(current or 'Response stopped.', tab_obj=t)
         ui.notify('Response stopped', type='info')
 
     def undo():
@@ -461,7 +462,7 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
     with ui.element('div').classes('fixed-header'):
         with ui.row().classes('gap-4 p-3 w-full'):
             model_select = ui.select(MODELS, value=DEFAULT_MODEL, label='Model').props(P).classes('text-white')
-            reasoning_select = ui.select(list(REASONING_LEVELS.keys()), value='low', label='Reasoning').props(P).classes('w-32 text-white')
+            reasoning_select = ui.select(list(REASONING_LEVELS.keys()), value='medium', label='Reasoning').props(P).classes('w-32 text-white')
             with ui.element('div').classes('flex-grow relative'):
                 file_search = ui.input(placeholder='Search files to attach...').props(f'{P} debounce=250 id=file-search').classes('w-full')
                 file_results_container = ui.column().classes('file-results')
@@ -486,6 +487,16 @@ window.stopAnswerTimer=id=>{if(!runningTimers.has(id))return; clearInterval(runn
     update_footer_visibility()
 
     refresh_tabs()
+
+    if not state.get('dc_hook_registered'):
+        def _on_disconnect():
+            for t in tabs:
+                if t.get('streaming'):
+                    md = t.get('markdown')
+                    current = '' if t.get('reasoning_mode') else ((md.content or '') if md else '')
+                    finish_stream(current or 'Response stopped.', tab_obj=t)
+        app.on_disconnect(_on_disconnect)
+        state['dc_hook_registered'] = True
 
 if __name__ in {'__main__','__mp_main__'}:
     parser = argparse.ArgumentParser()

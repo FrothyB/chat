@@ -1,6 +1,6 @@
 import os, json, aiohttp, asyncio, contextlib, re, tempfile
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from aiohttp import ClientResponse
 from stuff import * 
@@ -118,7 +118,8 @@ class ChatClient:
         self.files: List[str] = []
         self.message_files: Dict[int, List[str]] = {}
         self.headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json", "Accept": "text/event-stream"}
-        self.edited_files: Dict[str, EditFile] = {}
+        self.edited_files: Dict[str, bool] = {}
+        self.edit_transactions: List[Dict] = []
 
     async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = "minimal"):
         msg_index = len(self.messages)
@@ -131,7 +132,7 @@ class ChatClient:
         data = {"model": model, "messages": self.messages[:-1], "max_tokens": 50000, "temperature": 0.2, "stream": True}
         if reasoning != "none":
             key = "effort" if ('openai' in model or 'x-ai' in model) else "max_tokens"
-            data["reasoning"] = {key: reasoning if key == "effort" else REASONING_LEVELS[reasoning]}
+            data["reasoning"] = {key: reasoning if key == "effort" else REASONING_LEVELS[reasoning], "enabled": True}
         full_response, full_reasoning = "", ""
         timeout = aiohttp.ClientTimeout(total=1800, sock_read=1800)
         connector = aiohttp.TCPConnector(enable_cleanup_closed=True)
@@ -261,6 +262,17 @@ class ChatClient:
         directives = self.parse_edit_markdown(md)
         if not directives: return []
         results: List[EditEvent] = []
+        ai = (len(self.messages) - 1) if (self.messages and self.messages[-1]['role'] == 'assistant') else None
+        tx = {'assistant_index': ai, 'files': {}, 'changed': set()}  # files: path->prev content (or None)
+
+        def _remember_prev(path: str):
+            if path in tx['files']: return
+            p = Path(path)
+            prev = p.read_text(encoding='utf-8') if p.exists() else None
+            tx['files'][path] = prev
+
+        def _mark_changed(path: str):
+            tx['changed'].add(path)
 
         for d in directives:
             try:
@@ -274,8 +286,9 @@ class ChatClient:
                         try: original = p.read_text(encoding='utf-8')
                         except Exception as e: results.append(EditEvent('error', name, f'Read error: {e}', target)); continue
                     try:
+                        _remember_prev(target)
                         self._atomic_write(p, d.rewrite or '')
-                        self._remember_original(target, original)
+                        _mark_changed(target)
                         o = 0 if original is None else len(self._norm_newlines(original).split('\n'))
                         n = len(self._norm_newlines(d.rewrite or '').split('\n'))
                         results.append(EditEvent('complete', name, (f"{o} → {n} lines" if original is not None else f"created: {n} lines"), target))
@@ -301,8 +314,6 @@ class ChatClient:
                 for i, blk in enumerate(d.replaces, 1):
                     old = self._norm_newlines(blk.old)
                     new = self._norm_newlines(blk.new)
-
-                    # Try a few tolerant variants to locate the block
                     candidates = [old]
                     if old.endswith('\n'): candidates.append(old[:-1])
                     if old and not old.endswith('\n'): candidates.append(old + '\n')
@@ -326,8 +337,9 @@ class ChatClient:
                 if updated == original and replaced == 0:
                     results.append(EditEvent('error', name, 'No changes applied', target)); continue
                 try:
+                    _remember_prev(target)
                     self._atomic_write(p, updated)
-                    self._remember_original(target, original)
+                    _mark_changed(target)
                     o = len(self._norm_newlines(original).split('\n'))
                     n = len(self._norm_newlines(updated).split('\n'))
                     results.append(EditEvent('complete', name, f"replaced {replaced} block(s): {o} → {n} lines", target))
@@ -335,30 +347,79 @@ class ChatClient:
                     results.append(EditEvent('error', name, f'Write error: {e}', target))
             except Exception as e:
                 results.append(EditEvent('error', Path(d.filename).name, f'Error: {e}', d.filename))
+
+        if tx['changed']:
+            # keep only changed files in the tx
+            tx['files'] = {p: tx['files'][p] for p in tx['changed']}
+            self.edit_transactions.append(tx)
+            for p in tx['changed']: self.edited_files[p] = True
         return results
 
     def rollback_file(self, file_path: str) -> bool:
-        if file_path in self.edited_files:
+        # revert only the most recent transaction that touched this file
+        for i in range(len(self.edit_transactions) - 1, -1, -1):
+            tx = self.edit_transactions[i]
+            changed: Set[str] = tx.get('changed', set())
+            if file_path not in changed: continue
+            prev = tx['files'].get(file_path, None)
+            p = Path(file_path)
             try:
-                edit = self.edited_files[file_path]
-                if edit.original_content is None:
-                    with contextlib.suppress(FileNotFoundError): Path(file_path).unlink()
+                if prev is None:
+                    with contextlib.suppress(FileNotFoundError): p.unlink()
                 else:
-                    Path(file_path).write_text(edit.original_content, encoding='utf-8')
-                del self.edited_files[file_path]
-                return True
-            except:
+                    p.write_text(prev, encoding='utf-8')
+            except Exception:
                 return False
+            # update transaction
+            changed.remove(file_path)
+            tx['files'].pop(file_path, None)
+            if not changed:
+                self.edit_transactions.pop(i)
+            # rebuild edited_files index
+            current = {}
+            for t in self.edit_transactions:
+                for path in t.get('changed', set()): current[path] = True
+            self.edited_files = current
+            return True
         return False
 
     def rollback_all_edits(self):
-        for file_path in list(self.edited_files.keys()):
-            self.rollback_file(file_path)
+        # revert everything across all transactions (used rarely)
+        while self.edit_transactions:
+            tx = self.edit_transactions.pop()
+            for path in list(tx.get('changed', set())):
+                prev = tx['files'].get(path, None)
+                p = Path(path)
+                with contextlib.suppress(Exception):
+                    if prev is None:
+                        with contextlib.suppress(FileNotFoundError): p.unlink()
+                    else:
+                        p.write_text(prev, encoding='utf-8')
+        self.edited_files = {}
+
+    def rollback_edits_for_assistant(self, assistant_index: int):
+        # revert only the transactions for this assistant (LIFO)
+        while self.edit_transactions and self.edit_transactions[-1].get('assistant_index') == assistant_index:
+            tx = self.edit_transactions.pop()
+            for path in list(tx.get('changed', set())):
+                prev = tx['files'].get(path, None)
+                p = Path(path)
+                with contextlib.suppress(Exception):
+                    if prev is None:
+                        with contextlib.suppress(FileNotFoundError): p.unlink()
+                    else:
+                        p.write_text(prev, encoding='utf-8')
+        # rebuild edited_files index
+        current = {}
+        for t in self.edit_transactions:
+            for path in t.get('changed', set()): current[path] = True
+        self.edited_files = current
 
     def undo_last(self) -> Tuple[Optional[str], List[str]]:
         if len(self.messages) < 3 or self.messages[-1]['role'] != 'assistant':
             return None, []
-        self.rollback_all_edits()
+        ai = len(self.messages) - 1
+        self.rollback_edits_for_assistant(ai)
         self.messages.pop()
         for i in range(len(self.messages) - 1, -1, -1):
             if self.messages[i]['role'] == 'user':
@@ -374,3 +435,14 @@ class ChatClient:
 
     def get_display_messages(self) -> List[Tuple[str, str]]:
         return [(m['role'], m['content'].split('\n\nAttached files:')[0] if m['role'] == 'user' else m['content']) for m in self.messages[1:]]
+
+    # --- New helper to finalize placeholders ---
+
+    def ensure_last_assistant_nonempty(self, fallback: str = 'Response stopped.'):
+        try:
+            if self.messages and self.messages[-1]['role'] == 'assistant':
+                content = (self.messages[-1].get('content') or '').strip()
+                if content == '':
+                    self.messages[-1]['content'] = fallback
+        except Exception:
+            pass
