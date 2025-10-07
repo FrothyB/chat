@@ -8,7 +8,7 @@ from stuff import *
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-5"
-MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast"]
+MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast", "openai/gpt-5-pro"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 10) -> List[str]:

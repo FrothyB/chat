@@ -45,7 +45,9 @@ Rules:
 Rules:
 - Each REWRITE must include the full new file content.
 
-When making changes, strongly prefer EDIT unless you must change most or all of a file for major refactors. Think before responding about which is more appropriate. Also explain to the user the important/noteworthy overview/parts of your changes. If making multiple rounds of changes, keep in mind that your earlier modifications will now be part of the file, and you should act accordingly (notably later edits should replace earlier ones where relevant).
+When making changes, strongly prefer EDIT unless you must change most or all of a file for major refactors. Think before responding about which is more appropriate. 
+Explain to the user the important aspects of your changes in moderate detail. 
+If making multiple rounds of changes, keep in mind that your earlier modifications will now be part of the file, and you must use the latest version of the code as the basis for your edits.
 '''
 
 EXTRACT_ADD_ON = '''
