@@ -1,14 +1,16 @@
-import os, json, aiohttp, asyncio, contextlib, re, tempfile
+import os, json, asyncio, contextlib, re, tempfile
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional, Tuple, Set, AsyncGenerator, Union
 from dataclasses import dataclass, field
-from aiohttp import ClientResponse
-from stuff import * 
+from stuff import *
+from openai import AsyncOpenAI
+import httpx
 
 API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-5"
-MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast", "openai/gpt-5-pro"]
+MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast", "openai/gpt-5-pro", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 10) -> List[str]:
@@ -72,56 +74,27 @@ class EditDirective:
     rewrite: Optional[str] = None
     replaces: List[ReplaceBlock] = field(default_factory=list)
 
-async def _iter_sse_lines(resp: ClientResponse):
-    buf = b""
-    data_lines, event = [], None
-    async def dispatch():
-        nonlocal data_lines, event
-        if not data_lines: event = None; return None
-        payload = "\n".join(data_lines); data_lines, event = [], None; return payload
-    try:
-        async for chunk in resp.content.iter_any():
-            if not chunk: continue
-            buf += chunk
-            while True:
-                i = buf.find(b'\n')
-                if i == -1: break
-                raw, buf = buf[:i], buf[i+1:]
-                line = raw.decode('utf-8', errors='ignore').rstrip('\r')
-                if line == '':
-                    payload = await dispatch()
-                    if payload not in (None, ''): yield payload
-                    continue
-                if line.startswith(':'): continue
-                if ':' in line:
-                    field, value = line.split(':', 1); value = value[1:] if value.startswith(' ') else value
-                else:
-                    field, value = line, ''
-                if field == 'data': data_lines.append(value)
-                elif field == 'event': event = value
-        if buf:
-            line = buf.decode('utf-8', errors='ignore').rstrip('\r')
-            if line and not line.startswith(':'):
-                if ':' in line:
-                    field, value = line.split(':', 1); value = value[1:] if value.startswith(' ') else value
-                else:
-                    field, value = line, ''
-                if field == 'data': data_lines.append(value)
-        payload = await dispatch()
-        if payload not in (None, ''): yield payload
-    except (asyncio.CancelledError, GeneratorExit):
-        raise
-
 class ChatClient:
     def __init__(self):
         self.messages = [{"role": "system", "content": CHAT_PROMPT}]
         self.files: List[str] = []
         self.message_files: Dict[int, List[str]] = {}
-        self.headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json", "Accept": "text/event-stream"}
         self.edited_files: Dict[str, bool] = {}
         self.edit_transactions: List[Dict] = []
+        self.client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=7200, max_retries=20) # http_client = httpx.AsyncClient(timeout=7200))
+        self.openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+    
+    def get_completion(self, data):
+        # if 'openai' in data["model"] and self.openai_client:
+        #     data["model"] = data["model"].replace('openai/', '')
+        #     data["max_completion_tokens"] = data.pop("max_tokens", 50000)
+        #     data.pop("temperature", None)
+        #     print("Using OpenAI client")
+        #     return self.openai_client.chat.completions.create(**data)
+        return self.client.chat.completions.create(**data)
 
-    async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = "minimal"):
+    async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = "minimal"
+                            ) -> AsyncGenerator[Union[str, ReasoningEvent], None]:
         msg_index = len(self.messages)
         if self.files: self.message_files[msg_index] = self.files.copy()
         content = user_msg + (f"\n\nAttached files:\n{read_files(self.files)}" if self.files else "")
@@ -129,33 +102,29 @@ class ChatClient:
         self.files = []
         assistant_index = len(self.messages)
         self.messages.append({"role": "assistant", "content": ""})
-        data = {"model": model, "messages": self.messages[:-1], "max_tokens": 50000, "temperature": 0.2, "stream": True}
-        if reasoning != "none":
-            key = "effort" if ('openai' in model or 'x-ai' in model) else "max_tokens"
-            data["reasoning"] = {key: reasoning if key == "effort" else REASONING_LEVELS[reasoning], "enabled": True}
+        data = {"model": model, "messages": self.messages[:-1], "max_tokens": 50000, "temperature": 0.2, "stream": True, "reasoning_effort": reasoning}
+        # if reasoning != "none":
+        #     key = "effort" if ('openai' in model or 'x-ai' in model) else "max_tokens"
+        #     data["reasoning"] = {"enabled": True, key: reasoning if key == "effort" else REASONING_LEVELS[reasoning]}
         full_response, full_reasoning = "", ""
-        timeout = aiohttp.ClientTimeout(total=1800, sock_read=1800)
-        connector = aiohttp.TCPConnector(enable_cleanup_closed=True)
         try:
-            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-                async with session.post(f"{BASE_URL}/chat/completions", headers=self.headers, json=data) as resp:
-                    if resp.status != 200: raise Exception(f"API error: {await resp.text()}")
-                    async for payload in _iter_sse_lines(resp):
-                        if not payload: continue
-                        if payload.strip() == '[DONE]': break
-                        with contextlib.suppress(Exception):
-                            obj = json.loads(payload)
-                            choice = (obj.get('choices') or [{}])[0]
-                            delta = choice.get('delta', {})
-                            if (text := delta.get('content')):
-                                full_response += text
-                                self.messages[assistant_index]["content"] = full_response
-                                yield text
-                            r = delta.get('reasoning')
-                            reason = r.get('content') if isinstance(r, dict) else (r if isinstance(r, str) else None)
-                            if reason:
-                                full_reasoning += reason
-                                yield ReasoningEvent(text=reason)
+            stream = await self.get_completion(data)
+            async for chunk in stream:
+                try:
+                    choice = (getattr(chunk, "choices", None) or [None])[0]
+                    if not choice: continue
+                    delta = getattr(choice, "delta", None) or {}
+                    text = getattr(delta, "content", None)
+                    if text:
+                        full_response += text
+                        self.messages[assistant_index]["content"] = full_response
+                        yield text
+                    r = getattr(delta, "reasoning", None)
+                    reason = r.get("content") if isinstance(r, dict) else (r if isinstance(r, str) else None)
+                    if reason:
+                        full_reasoning += reason
+                        yield ReasoningEvent(text=reason)
+                except Exception: continue
             self.messages[assistant_index]["content"] = full_response
         except (asyncio.CancelledError, GeneratorExit):
             raise
@@ -165,12 +134,10 @@ class ChatClient:
     def parse_edit_markdown(self, md: str) -> List[EditDirective]:
         if not md: return []
         text = md.replace('\r\n', '\n').replace('\r', '\n')
-
         sec_hdr = re.compile(r'(?im)^###\s*(EDIT|REWRITE)\s+(.+?)\s*$')
         code_fence = re.compile(r'```[ \t]*([^\n]*)\n(.*?)```', re.DOTALL)
         rep_hdr = re.compile(r'(?im)^####\s*REPLACE\s*$')
         with_hdr = re.compile(r'(?im)^####\s*WITH\s*$')
-
         matches = list(sec_hdr.finditer(text))
         out: List[EditDirective] = []
         for i, m in enumerate(matches):
@@ -178,15 +145,12 @@ class ChatClient:
             start = m.end()
             end = matches[i+1].start() if i+1 < len(matches) else len(text)
             section = text[start:end].strip()
-
             if kind == 'REWRITE':
                 mcode = code_fence.search(section)
                 explanation = section[:mcode.start()].strip() if mcode else section.strip()
                 rewrite = mcode.group(2) if mcode else ''
                 out.append(EditDirective(kind='REWRITE', filename=filename, explanation=explanation, rewrite=rewrite))
                 continue
-
-            # EDIT
             replaces: List[ReplaceBlock] = []
             pos = 0
             while True:
@@ -203,7 +167,6 @@ class ChatClient:
                     pos = w.end(); continue
                 replaces.append(ReplaceBlock(old=m_old.group(2), new=m_new.group(2)))
                 pos = m_new.end()
-
             first_rep = rep_hdr.search(section)
             explanation = section[:first_rep.start()].strip() if first_rep else section.strip()
             out.append(EditDirective(kind='EDIT', filename=filename, explanation=explanation, replaces=replaces))
@@ -213,16 +176,13 @@ class ChatClient:
         name = filename.strip()
         cand = Path(name)
         if cand.exists(): return str(cand)
-
         ctx_files: List[str] = []
         if self.message_files:
             ctx_files = self.message_files.get(max(self.message_files.keys()), [])
         ctx_paths = [Path(p) for p in ctx_files]
-
         def suffix_matches(p: Path, suffix: Path) -> bool:
             sp, pp = suffix.parts, p.parts
             return len(pp) >= len(sp) and tuple(pp[-len(sp):]) == sp
-
         if ctx_paths:
             if len(cand.parts) > 1:
                 matches = [p for p in ctx_paths if suffix_matches(p, cand)]
@@ -231,7 +191,6 @@ class ChatClient:
             base_matches = [p for p in ctx_paths if p.name == cand.name]
             if len(base_matches) == 1: return str(base_matches[0])
             if len(base_matches) > 1: return None
-
         for base in ['/home/pygmy/code', '.']:
             p = Path(base) / name
             if p.exists(): return str(p)
@@ -263,7 +222,7 @@ class ChatClient:
         if not directives: return []
         results: List[EditEvent] = []
         ai = (len(self.messages) - 1) if (self.messages and self.messages[-1]['role'] == 'assistant') else None
-        tx = {'assistant_index': ai, 'files': {}, 'changed': set()}  # files: path->prev content (or None)
+        tx = {'assistant_index': ai, 'files': {}, 'changed': set()}
 
         def _remember_prev(path: str):
             if path in tx['files']: return
@@ -296,7 +255,6 @@ class ChatClient:
                         results.append(EditEvent('error', name, f'Write error: {e}', target))
                     continue
 
-                # EDIT
                 target = self._resolve_path(d.filename, create_if_missing=False)
                 if not target:
                     results.append(EditEvent('error', Path(d.filename).name, 'File not found', d.filename)); continue
@@ -317,16 +275,13 @@ class ChatClient:
                     candidates = [old]
                     if old.endswith('\n'): candidates.append(old[:-1])
                     if old and not old.endswith('\n'): candidates.append(old + '\n')
-
                     found_cand, idx = None, -1
                     for cand in candidates:
                         idx = norm.find(cand)
                         if idx != -1:
                             found_cand = cand; break
-
                     if found_cand is None:
                         missing.append(i); continue
-
                     norm = norm[:idx] + new + norm[idx+len(found_cand):]
                     replaced += 1
 
@@ -349,14 +304,12 @@ class ChatClient:
                 results.append(EditEvent('error', Path(d.filename).name, f'Error: {e}', d.filename))
 
         if tx['changed']:
-            # keep only changed files in the tx
             tx['files'] = {p: tx['files'][p] for p in tx['changed']}
             self.edit_transactions.append(tx)
             for p in tx['changed']: self.edited_files[p] = True
         return results
 
     def rollback_file(self, file_path: str) -> bool:
-        # revert only the most recent transaction that touched this file
         for i in range(len(self.edit_transactions) - 1, -1, -1):
             tx = self.edit_transactions[i]
             changed: Set[str] = tx.get('changed', set())
@@ -370,12 +323,10 @@ class ChatClient:
                     p.write_text(prev, encoding='utf-8')
             except Exception:
                 return False
-            # update transaction
             changed.remove(file_path)
             tx['files'].pop(file_path, None)
             if not changed:
                 self.edit_transactions.pop(i)
-            # rebuild edited_files index
             current = {}
             for t in self.edit_transactions:
                 for path in t.get('changed', set()): current[path] = True
@@ -384,7 +335,6 @@ class ChatClient:
         return False
 
     def rollback_all_edits(self):
-        # revert everything across all transactions (used rarely)
         while self.edit_transactions:
             tx = self.edit_transactions.pop()
             for path in list(tx.get('changed', set())):
@@ -398,7 +348,6 @@ class ChatClient:
         self.edited_files = {}
 
     def rollback_edits_for_assistant(self, assistant_index: int):
-        # revert only the transactions for this assistant (LIFO)
         while self.edit_transactions and self.edit_transactions[-1].get('assistant_index') == assistant_index:
             tx = self.edit_transactions.pop()
             for path in list(tx.get('changed', set())):
@@ -409,7 +358,6 @@ class ChatClient:
                         with contextlib.suppress(FileNotFoundError): p.unlink()
                     else:
                         p.write_text(prev, encoding='utf-8')
-        # rebuild edited_files index
         current = {}
         for t in self.edit_transactions:
             for path in t.get('changed', set()): current[path] = True
@@ -435,8 +383,6 @@ class ChatClient:
 
     def get_display_messages(self) -> List[Tuple[str, str]]:
         return [(m['role'], m['content'].split('\n\nAttached files:')[0] if m['role'] == 'user' else m['content']) for m in self.messages[1:]]
-
-    # --- New helper to finalize placeholders ---
 
     def ensure_last_assistant_nonempty(self, fallback: str = 'Response stopped.'):
         try:
