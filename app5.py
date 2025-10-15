@@ -387,4 +387,4 @@ if __name__ in {'__main__','__mp_main__'}:
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8080)
     args = parser.parse_args()
-    ui.run(title='AI Chat', port=args.port, host='0.0.0.0', dark=True, show=False, reconnect_timeout=300)
+    ui.run(title='AI Chat', port=args.port, host='0.0.0.0', dark=True, show=False, reconnect_timeout=300, ssl_certfile="cert.pem", ssl_keyfile="key.pem")
