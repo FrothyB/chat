@@ -21,7 +21,7 @@ async def main_page():
     s.setdefault('file_results', [])
     s.setdefault('file_idx', -1)
     s.setdefault('edit_history', [])
-    for k in ('container','container_id','markdown','markdown_head','markdown_tail','answer_id','stream'):
+    for k in ('container','container_id','markdown_head','markdown_tail','answer_id','stream'):
         s.pop(k, None)
 
     ui.add_head_html(STYLE_CSS)
@@ -72,14 +72,10 @@ async def main_page():
         '''
         ui.run_javascript(js)
 
-    def update_footer_visibility():
-        back_button.visible = not s.get('streaming', False)
-        stop_button.visible = s.get('streaming', False)
-
     def update_reasoning(text: str | None):
         if not text or not s.get('reasoning_mode'): return
         s['reasoning_buffer'] = (s.get('reasoning_buffer') or '') + text
-        md = s.get('markdown_tail') or s.get('markdown')
+        md = s.get('markdown_tail')
         if not md: return
         now = time.monotonic(); last_ts = s.get('reasoning_last_update') or 0.0
         if (now - last_ts) < 0.08: return
@@ -180,7 +176,8 @@ async def main_page():
         fallback = (full_text or '').rstrip()
         current_rendered = f"{(md_head.content if md_head else '') or ''}{(md_tail.content if md_tail else '') or ''}".rstrip() if (md_head or md_tail) else ''
         if not fallback: fallback = current_rendered
-        with contextlib.suppress(Exception): s['chat'].ensure_last_assistant_nonempty(fallback or 'Response stopped.')
+        with contextlib.suppress(Exception): 
+            s['chat'].ensure_last_assistant_nonempty(fallback or 'Response stopped.')
         if md_head or md_tail:
             head_text = (md_head.content if md_head else '') or ''
             tail_text = (md_tail.content if md_tail else '') or ''
@@ -192,9 +189,8 @@ async def main_page():
             stream = s.pop('stream', None)
             if hasattr(stream, 'aclose'): 
                 asyncio.create_task(stream.aclose())
-        for k in ('markdown','markdown_head','markdown_tail','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode'):
+        for k in ('markdown_head','markdown_tail','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode'):
             s.pop(k, None)
-        update_footer_visibility()
 
     async def apply_edits_from_response(full_text: str):
         try:
@@ -215,9 +211,10 @@ async def main_page():
         s['draft'] = ''; input_field.value = ''
         timer = show_message('assistant', '')
         start_time = time.time() if timer else None
-        s['streaming'] = True; s['reasoning_mode'] = True; s['reasoning_buffer'] = ''; update_footer_visibility()
+        s['streaming'] = True; s['reasoning_mode'] = True; s['reasoning_buffer'] = ''
 
-        stream = s['chat'].stream_message(to_send, model_select.value, reasoning_select.value); s['stream'] = stream
+        stream = s['chat'].stream_message(to_send, model_select.value, reasoning_select.value)
+        s['stream'] = stream
         full, error_msg = "", None
         md_head, md_tail = s.get('markdown_head'), s.get('markdown_tail')
         head_text, tail_text = '', ''
@@ -233,7 +230,8 @@ async def main_page():
                 while i >= 0 and scan[i] == '`' and c < 2: c += 1; i -= 1
                 trailing_backticks = '`' * c
 
-        def render_tail() -> str: return tail_text + ('\n```' if (fence_count & 1) else '')
+        def render_tail() -> str: 
+            return tail_text + ('\n```' if (fence_count & 1) else '')
 
         def try_promote():
             nonlocal head_text, tail_text
@@ -255,7 +253,8 @@ async def main_page():
 
                 if not s.get('streaming'): break
                 if isinstance(chunk, ReasoningEvent):
-                    if s.get('reasoning_mode'): update_reasoning(chunk.text); continue
+                    if s.get('reasoning_mode'): 
+                        update_reasoning(chunk.text); continue
                 else:
                     if s.get('reasoning_mode'):
                         s['reasoning_mode'] = False; s['reasoning_buffer'] = ''
@@ -263,17 +262,17 @@ async def main_page():
                         if md_head: md_head.content = ''
                         last_update = 0.0; fence_count = 0; trailing_backticks = ''
 
-                    full += chunk; tail_text += chunk; update_fences(chunk)
+                    full += chunk; tail_text += chunk
+                    update_fences(chunk)
 
                     now = time.monotonic()
-                    if (md_tail or md_head) and (now - last_update) >= tick:
+                    if (md_tail or md_head): # and (now - last_update) >= tick:
                         try_promote()
                         if md_head: md_head.content = head_text
                         if md_tail: md_tail.content = render_tail()
                         last_update = now
 
-                await asyncio.sleep(0.01)
-
+        
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -283,13 +282,11 @@ async def main_page():
                 try_promote()
                 if md_head: md_head.content = head_text
                 if md_tail: md_tail.content = render_tail()
-            with contextlib.suppress(Exception):
-                if hasattr(stream, 'aclose'): await stream.aclose()
             finish_stream(full)
-
-        if error_msg: ui.notify(f"Error: {error_msg}", type='negative')
+        if error_msg: 
+            ui.notify(f"Error: {error_msg}", type='negative')
         else:
-            await apply_edits_from_response(full)
+           await apply_edits_from_response(full)
 
     def stop_streaming():
         if not s.get('streaming'):
@@ -312,7 +309,8 @@ async def main_page():
         else: ui.notify('No messages to undo', type='warning')
 
     async def handle_keydown(event): 
-        if event.args.get('key') == 'Enter' and not event.args.get('shiftKey'): await send()
+        if event.args.get('key') == 'Enter' and not event.args.get('shiftKey'): 
+            await send()
 
     def render_file_results():
         file_results_container.clear()
@@ -382,9 +380,8 @@ async def main_page():
             input_field = ui.textarea(placeholder='Type your message...').props(f'{P} rows=4 id=input-field').classes('flex-grow text-white').bind_value(app.storage.tab, 'draft')
             input_field.on('keydown', handle_keydown)
             mode_select = ui.select(['chat','extract'], label='Mode').props(P).classes('w-32 text-white').bind_value(app.storage.tab, 'mode')
-            back_button = ui.button('Back', on_click=undo, icon='undo').props('color=orange')
-            stop_button = ui.button('Stop', on_click=stop_streaming, icon='stop').props('color=red')
-    update_footer_visibility()
+            back_button = ui.button('Back', on_click=undo, icon='undo').bind_visibility_from(s, 'streaming', lambda v: not v).props('color=orange')
+            stop_button = ui.button('Stop', on_click=stop_streaming, icon='stop').bind_visibility_from(s, 'streaming').props('color=red')
 
 if __name__ in {'__main__','__mp_main__'}:
     parser = argparse.ArgumentParser()
