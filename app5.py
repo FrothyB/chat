@@ -250,7 +250,7 @@ async def main_page():
             line = tail_text.rfind('\n') # if fence_count & 1 == 0 else '\n\n')
             if line == -1: return False
             cut = line + 1
-            if cut <= 40: return False
+            if cut <= 60: return False
             head_text += tail_text[:cut]; tail_text = tail_text[cut:]
             return True
 
