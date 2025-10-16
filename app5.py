@@ -241,20 +241,18 @@ async def main_page():
                 while i >= 0 and scan[i] == '`' and c < 2: c += 1; i -= 1
                 trailing_backticks = '`' * c
 
-        def render_tail() -> str: 
-            return tail_text + ('\n```' if (fence_count & 1) else '')
+        # def render_tail() -> str: 
+        #     return tail_text + ('\n```' if (fence_count & 1) else '')
 
         def try_promote():
             nonlocal head_text, tail_text
-            if (fence_count & 1): return
-            para = tail_text.rfind('\n\n')
-            if para != -1: cut = para + 2
-            else:
-                line = tail_text.rfind('\n')
-                if line == -1: return
-                cut = line + 1
-            if cut <= 0: return
+            # if (fence_count & 1): return False
+            line = tail_text.rfind('\n') # if fence_count & 1 == 0 else '\n\n')
+            if line == -1: return False
+            cut = line + 1
+            if cut <= 40: return False
             head_text += tail_text[:cut]; tail_text = tail_text[cut:]
+            return True
 
         try:
             async for chunk in stream:
@@ -273,14 +271,15 @@ async def main_page():
                         if md_head: md_head.content = ''
                         last_update = 0.0; fence_count = 0; trailing_backticks = ''
 
-                    full += chunk; tail_text += chunk
+                    # full += chunk
+                    tail_text += chunk
                     update_fences(chunk)
 
                     now = time.monotonic()
                     if (md_tail or md_head): # and (now - last_update) >= tick:
-                        try_promote()
-                        if md_head: md_head.content = head_text
-                        if md_tail: md_tail.content = render_tail()
+                        extra_backticks = '```' if (fence_count & 1) else ''
+                        if try_promote() and md_head: md_head.content = head_text + extra_backticks
+                        if md_tail: md_tail.content = tail_text #+ extra_backticks
                         last_update = now
 
         
@@ -289,10 +288,9 @@ async def main_page():
         except Exception as e:
             error_msg = str(e)
         finally:
-            if md_head or md_tail:
-                try_promote()
-                if md_head: md_head.content = head_text
-                if md_tail: md_tail.content = render_tail()
+            full = head_text + tail_text
+            md_head.content = full
+            md_tail.content = ''
             finish_stream(full)
         if error_msg: 
             ui.notify(f"Error: {error_msg}", type='negative')
