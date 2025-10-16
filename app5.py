@@ -82,25 +82,34 @@ async def main_page():
         md.content = s['reasoning_buffer']
         s['reasoning_last_update'] = now
 
-    def build_tools(target_id: str, with_timer: bool = False):
+    def build_tools(target_id: str, with_timer: bool = False, get_text=None):
         tools = ui.element('div').classes('answer-tools').props(f'id={target_id}-tools')
         timer = None
         with tools:
-            copy_btn_id = f'{target_id}-copy'
-            text_expr = f'(document.getElementById("{target_id}")?.innerText || "").trim()'
-            js = f'''
-                () => {{
-                    const btn = document.getElementById("{copy_btn_id}");
-                    const text = {text_expr};
-                    if (!text) return;
-                    navigator.clipboard?.writeText(text).then(() => {{
-                        btn?.classList.add('copied');
-                        setTimeout(() => btn?.classList.remove('copied'), 1000);
-                    }}).catch(err => console.error('Clipboard error:', err));
-                }}
-            '''
-            btn = ui.button('', icon='content_copy').props('flat dense').classes('tool-btn copy-icon').props(f'id={copy_btn_id}')
-            btn.on('click', js_handler=js)
+            # copy_btn_id = f'{target_id}-copy'
+            # text_expr = f'(document.getElementById("{target_id}")?.innerText || "").trim()'
+            # js = f'''
+            #     () => {{
+            #         const btn = document.getElementById("{copy_btn_id}");
+            #         const text = {text_expr};
+            #         if (!text) return;
+            #         navigator.clipboard?.writeText(text).then(() => {{
+            #             btn?.classList.add('copied');
+            #             setTimeout(() => btn?.classList.remove('copied'), 1000);
+            #         }}).catch(err => console.error('Clipboard error:', err));
+            #     }}
+            # '''
+            # btn = ui.button('', icon='content_copy').props('flat dense').classes('tool-btn copy-icon').props(f'id={copy_btn_id}')
+            copy_btn_id = f'{target_id}-copy'; btn = None
+            async def on_copy(getter=get_text or (lambda: '')):
+                text = (getter() or '').rstrip()
+                ui.clipboard.write(text)
+                if btn:
+                    btn.classes('copied')
+                    await asyncio.sleep(1)
+                    btn.classes(remove='copied')
+            btn = ui.button('', on_click=on_copy).props('icon=content_copy flat dense').classes('tool-btn copy-icon').props(f'id={copy_btn_id}')
+            # btn.on('click', js_handler=js)
             if with_timer: timer = ui.label('0:00').classes('timer')
         return tools, timer
 
@@ -112,7 +121,7 @@ async def main_page():
                     with ui.element('div').classes('inline-block bg-blue-600 rounded-lg px-3 py-2 max-w-full min-w-0 user-bubble').props(f'id={uid}'):
                         ui.markdown(content, extras=MD_EXTRAS).classes(MD_USER)
                 with ui.element('div').classes('flex justify-end mt-1'):
-                    build_tools(uid)
+                    build_tools(uid, get_text=lambda c=content: c)
             else:
                 s['answer_counter'] += 1; aid = f'answer-{s["answer_counter"]}'
                 is_stream = (content == '')
@@ -122,10 +131,12 @@ async def main_page():
                             md_head = ui.markdown('', extras=MD_EXTRAS).classes(MD_ANS)
                             md_tail = ui.markdown('', extras=MD_EXTRAS).classes(MD_ANS)
                             s['answer_id'] = aid; s['markdown_head'] = md_head; s['markdown_tail'] = md_tail
+                            getter = lambda mh=md_head, mt=md_tail: f"{mh.content or ''}{mt.content or ''}"
                         else:
-                            ui.markdown(content, extras=MD_EXTRAS).classes(MD_ANS)
+                            md = ui.markdown(content, extras=MD_EXTRAS).classes(MD_ANS)
+                            getter = lambda m=md: m.content
                 with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
-                    tools, timer = build_tools(aid, with_timer=True)
+                    tools, timer = build_tools(aid, with_timer=True, get_text=getter)
                     return timer
 
     def show_file(path):
