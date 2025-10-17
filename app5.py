@@ -279,7 +279,7 @@ async def main_page():
                     if (md_tail or md_head): # and (now - last_update) >= tick:
                         extra_backticks = '```' if (fence_count & 1) else ''
                         if try_promote() and md_head: md_head.content = head_text + extra_backticks
-                        if md_tail: md_tail.content = tail_text #+ extra_backticks
+                        if now - last_update > 0.05 and md_tail: md_tail.content = tail_text #+ extra_backticks
                         last_update = now
 
         
