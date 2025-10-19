@@ -87,7 +87,6 @@ Control the depth of AI "thinking" before final responses. Higher levels allocat
 3. **Apply Edits**:
    - Instruct the AI to edit files (e.g., "Fix bugs in app5.py").
    - AI responds with markdown like:
-     ```
      ### EDIT app5.py
      Update the send function for better error handling.
 
@@ -102,7 +101,6 @@ Control the depth of AI "thinking" before final responses. Higher levels allocat
          async for chunk in stream:
              if isinstance(chunk, Exception):
                  raise chunk
-     ```
      ```
    - After response, an "Apply edits" bubble appears. Click to apply (atomic writes with backups).
    - Success/error bubbles show changes (e.g., "replaced 1 block(s): 100 → 105 lines").
