@@ -57,7 +57,6 @@ Control the depth of AI "thinking" before final responses. Higher levels allocat
    - For SSL (optional): Generate `cert.pem` and `key.pem` (self-signed or CA-issued).
 
 2. **Project Structure**:
-   ```
    .
    ├── app5.py          # Main NiceGUI app
    ├── utils.py         # ChatClient, file utils, edit parser
@@ -65,7 +64,6 @@ Control the depth of AI "thinking" before final responses. Higher levels allocat
    ├── README.md        # This file
    ├── cert.pem         # SSL cert (optional)
    └── key.pem          # SSL key (optional)
-   ```
 
 3. **Run the App**:
    ```bash
