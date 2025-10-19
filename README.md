@@ -1,7 +1,6 @@
 ### REWRITE README.md
 Creating a new comprehensive README.md from scratch to summarize the AI Chat application's purpose, features, setup, usage, and capabilities. This includes sections for quick overview, detailed features with tables for models and reasoning levels, installation instructions, usage examples, and a Mermaid diagram illustrating the core workflow (chat interaction, file handling, and edit application). The content is structured for clarity, using markdown elements like tables and diagrams where appropriate to present capabilities effectively.
 
-```markdown
 # AI Chat Application
 
 A modern, web-based AI chat interface built with [NiceGUI](https://nicegui.io/) and integrated with advanced language models via OpenRouter (or OpenAI). This application supports interactive conversations, file attachments (local or via URL scraping), reasoning-enabled responses, and automatic file editing based on AI-generated markdown directives. It's designed for developers, enabling seamless code review, generation, and modification workflows.
