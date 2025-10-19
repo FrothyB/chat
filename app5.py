@@ -343,7 +343,9 @@ async def main_page():
         if error_msg: 
             ui.notify(f"Error: {error_msg}", type='negative')
         else:
-            show_apply_all_bubble(full)
+            # Only show edits bubble if response includes EDIT/REWRITE directives
+            if s['chat'].parse_edit_markdown(full):
+                show_apply_all_bubble(full)
 
     def stop_streaming():
         if not s.get('streaming'):
