@@ -62,7 +62,7 @@ A fast, developer-focused AI chat app with file context, web page scraping, and 
   - OPENROUTER_API_KEY for OpenRouter (recommended)
   - OPENAI_API_KEY for direct OpenAI (optional)
 - SSL (optional)
-  - Place cert.pem and key.pem in the project root to enable HTTPS
+  - Place cert.pem and key.pem in the project root to enable HTTPS (may be necessary for copy+paste)
 
 ## Notes
 
