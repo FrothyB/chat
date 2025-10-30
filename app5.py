@@ -141,6 +141,8 @@ async def main_page():
 
     def remove_file(path):
         with contextlib.suppress(ValueError): s['chat'].files.remove(path)
+        if s.get('streaming'):
+            ui.notify('File removed; changes will reflect after the response finishes.', type='info'); return
         refresh_ui()
 
     def refresh_ui():
@@ -150,6 +152,12 @@ async def main_page():
         for item in (s.get('edit_history') or []): show_edit_bubble(item['path'], item.get('status','success'), item.get('info',''), record=False)
 
     def finish_stream(full_text: str):
+        renderer = s.pop('renderer', None)
+        if renderer:
+            if not full_text:
+                full_text = renderer.finish()
+            else:
+                with contextlib.suppress(Exception): renderer.finish()
         full_text = (full_text or '').rstrip() or 'Response stopped.'
         with contextlib.suppress(Exception): s['chat'].ensure_last_assistant_nonempty(full_text)
         md = s.get('answer_md') or s.get('reasoning_md')
@@ -158,6 +166,9 @@ async def main_page():
         with contextlib.suppress(Exception):
             stream = s.pop('stream', None)
             if hasattr(stream, 'aclose'): asyncio.create_task(stream.aclose())
+        with contextlib.suppress(Exception):
+            r = s.pop('reasoning_md', None)
+            if r: r.delete()
         for k in ('answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode'): s.pop(k, None)
 
     async def apply_edits_from_response(full_text: str):
@@ -238,7 +249,7 @@ async def main_page():
 
         def render(self, force: bool = False):
             now = time.monotonic()
-            if not force and (now - self.last_update) < 0.033: return
+            if not force and (now - self.last_update) < 0.05: return
             content = self.text + self.tail
             if self.in_code:
                 content += f'\n{self.indent}{self.fchar * self.flen}'
@@ -318,19 +329,12 @@ async def main_page():
             current = (s.get('reasoning_md').content if s.get('reasoning_md') else '') if s.get('reasoning_md') else ''
         else:
             md = s.get('answer_md'); current = (md.content if md else '') or ''
-        s['streaming'] = False
-        with contextlib.suppress(Exception):
-            stream = s.get('stream')
-            if hasattr(stream, 'aclose'): asyncio.create_task(stream.aclose())
         finish_stream((current or 'Response stopped.').rstrip())
         ui.notify('Response stopped', type='info')
 
     def clear_chat():
-        if s.get('streaming'):
-            with contextlib.suppress(Exception):
-                stream = s.get('stream')
-                if hasattr(stream, 'aclose'): asyncio.create_task(stream.aclose())
-            s['streaming'] = False
+        # If streaming, perform a proper stop first (same as pressing Stop)
+        if s.get('streaming'): stop_streaming()
         with contextlib.suppress(Exception):
             b = s.pop('apply_all_bubble', None)
             if b: b.delete()
@@ -339,7 +343,7 @@ async def main_page():
         for k in ('answer_md','answer_container','reasoning_md','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode','stream','renderer'): s.pop(k, None)
         s['answer_counter'] = 0; s['msg_counter'] = 0; s['file_results'] = []; s['file_idx'] = -1; s['edit_history'] = []
         with contextlib.suppress(Exception): input_field.value = ''
-        c = s.get('container'); 
+        c = s.get('container')
         if c: c.clear()
         refresh_ui(); ui.notify('Chat cleared', type='positive')
 
@@ -349,7 +353,9 @@ async def main_page():
         else: ui.notify('No messages to undo', type='warning')
 
     async def handle_keydown(event):
-        if event.args.get('key') == 'Enter' and not event.args.get('shiftKey'): await send()
+        if event.args.get('key') == 'Enter' and not event.args.get('shiftKey'):
+            with contextlib.suppress(Exception): await event.prevent_default()
+            await send()
 
     def render_file_results():
         file_results_container.clear()
@@ -398,8 +404,8 @@ async def main_page():
                 'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                                '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'),
                 'Accept': ('text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'),
-                'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Language': 'en-US,en;q=0.9',
                 'Cache-Control': 'no-cache', 'Pragma': 'no-cache', 'Upgrade-Insecure-Requests': '1',
             }
             if ref: h['Referer'] = ref
@@ -415,8 +421,8 @@ async def main_page():
                     resp = await client.get(u, headers=h2)
                 resp.raise_for_status()
                 ctype = (resp.headers.get('content-type') or '').lower()
-                if 'text/html' not in ctype and 'xml' not in ctype:
-                    ui.notify('URL is not HTML', type='warning'); return
+                if not any(x in ctype for x in ('text/html','xml','text/plain')):
+                    ui.notify('URL is not HTML/text', type='warning'); return
                 html = resp.text or ''
         except Exception as e:
             ui.notify(f'Fetch failed: {e}', type='negative'); return
