@@ -1,4 +1,4 @@
-import asyncio, contextlib, time, argparse, re, hashlib
+import asyncio, contextlib, time, argparse, re, hashlib, uuid
 from urllib.parse import urlparse
 import httpx
 from pathlib import Path
@@ -9,12 +9,26 @@ from utils import ChatClient, search_files, STYLE_CSS, MODELS, REASONING_LEVELS,
 async def main_page():
     await ui.context.client.connected()
     s = app.storage.tab
+
+    # Persistent state
     s.setdefault('chat', ChatClient()); s.setdefault('draft', ''); s.setdefault('model', DEFAULT_MODEL)
     s.setdefault('reasoning', 'medium'); s.setdefault('mode', 'chat'); s.setdefault('streaming', False)
     s.setdefault('reasoning_mode', False); s.setdefault('reasoning_buffer', ''); s.setdefault('answer_counter', 0)
     s.setdefault('msg_counter', 0); s.setdefault('file_results', []); s.setdefault('file_idx', -1)
     s.setdefault('edit_history', []); s.setdefault('pending_edits_text', None); s.setdefault('apply_all_bubble', None)
     s.setdefault('last_edit_round_status', None)
+
+    # Streaming producer/consumer state (persists across reconnects)
+    s.setdefault('session_id', str(uuid.uuid4()))
+    s.setdefault('stream_buffer', '')
+    s.setdefault('stream_done', False)
+    s.setdefault('stream_error', None)
+    s.setdefault('render_pos', 0)
+    s.setdefault('finalized', False)
+    s.setdefault('producer_task', None)
+    s.setdefault('consumer_timer', None)
+
+    # Ephemeral UI state
     for k in ('container','container_id','answer_md','answer_container','reasoning_md','answer_id','stream','renderer'):
         s.pop(k, None)
 
@@ -31,31 +45,41 @@ async def main_page():
     MD_USER = 'prose prose-sm max-w-none break-words'
     MD_ANS = MD_USER
 
-    def init_code_copy_buttons():
-        cid = s.get('container_id','')
-        if not cid: return
+    def scan_code_copy_buttons(root_id: str):
+        if not root_id: return
         js = f'''
         (() => {{
-          const root = document.getElementById('{cid}'); if (!root) return;
-          const addButtons = r => {{
-            r.querySelectorAll('pre > code').forEach(code => {{
+          const root = document.getElementById('{root_id}'); if (!root) return;
+          const mainCopy = document.getElementById('{root_id}-copy');
+          const addButtons = () => {{
+            let added = 0;
+            root.querySelectorAll('pre > code').forEach(code => {{
               const pre = code.parentElement; if (!pre || pre.dataset.copyBound) return;
               pre.dataset.copyBound = '1';
               const btn = document.createElement('button');
               btn.className = 'code-copy-btn tool-btn copy-icon'; btn.type='button';
               btn.title='Copy code'; btn.setAttribute('aria-label','Copy code');
-              btn.innerHTML='<span class="material-icons">content_copy</span>';
+              btn.innerHTML = '<span class="material-icons">content_copy</span>';
               btn.addEventListener('click', async (e) => {{
                 e.stopPropagation();
-                try {{ await navigator.clipboard.writeText(code.innerText || ''); btn.classList.add('copied'); setTimeout(()=>btn.classList.remove('copied'), 1000); }}
-                catch(e) {{ console.error(e); }}
+                try {{
+                  await navigator.clipboard.writeText(code.innerText || '');
+                  btn.classList.add('copied'); if (mainCopy) mainCopy.classList.add('copied');
+                  setTimeout(() => {{ btn.classList.remove('copied'); if (mainCopy) mainCopy.classList.remove('copied'); }}, 1000);
+                }} catch (e) {{ console.error(e); }}
               }});
-              pre.appendChild(btn);
+              pre.appendChild(btn); added++;
+            }});
+            return added;
+          }};
+          const countMissing = () => Array.from(root.querySelectorAll('pre')).filter(pre => !pre.dataset.copyBound).length;
+          const tryScan = (attempts) => {{
+            requestAnimationFrame(() => {{
+              addButtons();
+              if (countMissing() > 0 && attempts > 0) setTimeout(() => tryScan(attempts - 1), 80);
             }});
           }};
-          const obs = new MutationObserver(() => addButtons(root));
-          obs.observe(root, {{childList:true, subtree:true}});
-          addButtons(root);
+          tryScan(25);
         }})();
         '''
         ui.run_javascript(js)
@@ -65,7 +89,9 @@ async def main_page():
         s['reasoning_buffer'] = (s.get('reasoning_buffer') or '') + text
         md = s.get('reasoning_md'); now = time.monotonic(); last = s.get('reasoning_last_update') or 0.0
         if md and (now - last) >= 0.08:
-            md.content = s['reasoning_buffer']; s['reasoning_last_update'] = now
+            with contextlib.suppress(Exception):
+                md.content = s['reasoning_buffer']
+            s['reasoning_last_update'] = now
 
     def build_tools(target_id: str, with_timer: bool = False, get_text=None):
         tools = ui.element('div').classes('answer-tools').props(f'id={target_id}-tools'); timer = None
@@ -95,13 +121,17 @@ async def main_page():
                         if is_stream:
                             ans_container = ui.column().classes('answer-content')
                             with ans_container:
-                                reasoning_md = ui.markdown('', extras=MD_EXTRAS).classes(MD_ANS)
+                                if s.get('reasoning_mode'):
+                                    reasoning_md = ui.markdown(s.get('reasoning_buffer',''), extras=MD_EXTRAS).classes(MD_ANS)
+                                else:
+                                    reasoning_md = None
                             s['answer_id'] = aid; s['answer_container'] = ans_container
                             s['reasoning_md'] = reasoning_md; s['answer_md'] = None; s['renderer'] = None
                             def getter():
-                                md = s.get('answer_md'); 
-                                if md and md.content: return md.content
-                                r = s.get('reasoning_md'); return (r.content if r else '') or ''
+                                r = s.get('renderer')
+                                if r: return r.current_text()
+                                md = s.get('answer_md') or s.get('reasoning_md')
+                                return md.content if md else ''
                         else:
                             md = ui.markdown(content, extras=MD_EXTRAS).classes(MD_ANS); getter = lambda m=md: m.content
                 with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
@@ -147,7 +177,9 @@ async def main_page():
 
     def refresh_ui():
         s['container'].clear()
-        for role, content in s['chat'].get_display_messages(): show_message(role, content)
+        for role, content in s['chat'].get_display_messages():
+            t = show_message(role, content)
+            if role == 'assistant' and content == '' and t: asyncio.create_task(run_timer(t))
         for p in s['chat'].files: show_file(p)
         for item in (s.get('edit_history') or []): show_edit_bubble(item['path'], item.get('status','success'), item.get('info',''), record=False)
 
@@ -160,8 +192,15 @@ async def main_page():
                 with contextlib.suppress(Exception): renderer.finish()
         full_text = (full_text or '').rstrip() or 'Response stopped.'
         with contextlib.suppress(Exception): s['chat'].ensure_last_assistant_nonempty(full_text)
-        md = s.get('answer_md') or s.get('reasoning_md')
-        if md: md.content = full_text
+
+        cont = s.get('answer_container')
+        if cont:
+            cont.clear()
+            with cont:
+                final_md = ui.markdown(full_text, extras=MD_EXTRAS).classes(MD_ANS)
+            s['answer_md'] = final_md
+            with contextlib.suppress(Exception): scan_code_copy_buttons(s.get('answer_id',''))
+
         s['streaming'] = False
         with contextlib.suppress(Exception):
             stream = s.pop('stream', None)
@@ -201,65 +240,147 @@ async def main_page():
                     ui.button('Apply edits', on_click=on_apply).props('flat dense size=sm color=positive').classes('ml-2')
 
     class StreamAssembler:
-        def __init__(self, md):
-            self.md = md
-            self.text = ''     # committed full lines
-            self.tail = ''     # current partial line buffer
-            self.in_code = False
-            self.indent = ''
-            self.fchar = ''    # '`' or '~'
-            self.flen = 0      # fence length (>=3)
-            self.last_update = 0.0
+        def __init__(self, container, extras, css_class):
+            self.container = container; self.extras = extras; self.css_class = css_class
+            self.cur_md = None; self.cur_buf = []; self.segs = []; self.nodes = []
+            self.in_code = False; self.indent = ''; self.fchar = ''; self.flen = 0
+            self.prev_blank = True; self.had_content = False
+            self.last_update = 0.0; self.partial = ''; self.partial_in_buf = False
 
         def _open_match(self, line: str):
-            # up to 3 spaces, then >=3 backticks or tildes, then optional info, CRLF-safe
             return re.match(r'^( {0,3})(`{3,}|~{3,})([^\r\n]*)\r?\n$', line)
 
         def _close_match(self, line: str):
             if not self.in_code: return False
-            # same indent, same fence char, at least same length, optional spaces/tabs, CRLF-safe
-            pat = rf'^{re.escape(self.indent)}{re.escape(self.fchar)}{{{self.flen},}}[ \t]*\r?\n$'
-            return re.match(pat, line)
+            m = re.match(r'^( {0,3})(`{3,}|~{3,})[ \t]*\r?\n$', line)
+            if not m: return False
+            fence = m.group(2)
+            return fence[0] == self.fchar and len(fence) >= self.flen
+
+        def _ensure_cur_md(self):
+            if self.cur_md: return
+            with self.container:
+                self.cur_md = ui.markdown('', extras=self.extras).classes(self.css_class)
+
+        def _render(self, force: bool = False):
+            now = time.monotonic()
+            size = sum(map(len, self.cur_buf))
+            interval = 0.05 # if size < 2_000 else 0.08 if size < 10_000 else 0.20
+            if not force and (now - self.last_update) < interval: return
+            if not self.cur_md: return
+            content = ''.join(self.cur_buf)
+            if self.in_code: content += f'\n{self.indent}{self.fchar * self.flen}\n'
+            with contextlib.suppress(Exception):
+                self.cur_md.content = content
+            self.last_update = now
+
+        def _finalize_current(self):
+            if not self.cur_md:
+                self.cur_buf.clear(); self.prev_blank = True; self.had_content = False; return
+            self._render(force=True)
+            text = ''.join(self.cur_buf)
+            if text.strip(): self.segs.append(text); self.nodes.append(self.cur_md)
+            else:
+                with contextlib.suppress(Exception): self.cur_md.delete()
+            self.cur_md = None; self.cur_buf.clear(); self.prev_blank = True; self.had_content = False
 
         def feed(self, chunk: str):
-            self.tail += chunk or ''
+            if not chunk: return
+            if self.partial_in_buf and self.cur_buf:
+                self.cur_buf.pop(); self.partial_in_buf = False
+            data = (self.partial or '') + chunk; self.partial = ''
             while True:
-                i = self.tail.find('\n')
+                i = data.find('\n')
                 if i == -1: break
-                line = self.tail[:i+1]; self.tail = self.tail[i+1:]
+                line = data[:i+1]; data = data[i+1:]
+                blank = bool(re.match(r'^[ \t]*\r?\n$', line))
                 if not self.in_code:
                     m = self._open_match(line)
                     if m:
                         self.indent, fence, _ = m.groups()
                         self.fchar, self.flen = fence[0], len(fence)
-                        self.in_code = True
-                        self.text += line
-                        self.render(force=True)
-                        continue
-                    self.text += line
+                        self.in_code = True; self.cur_buf.append(line); self.had_content = True
+                        self._ensure_cur_md(); self._render(force=True); continue
+                    self.cur_buf.append(line)
+                    if not blank: self.had_content = True
+                    if blank and self.had_content and not self.in_code and not self.prev_blank:
+                        self._ensure_cur_md(); self._render(force=True); self._finalize_current(); continue
+                    self._ensure_cur_md(); self._render()
                 else:
+                    self.cur_buf.append(line)
                     if self._close_match(line):
-                        self.text += line
-                        self.in_code = False
-                        self.render(force=True)
-                        continue
-                    self.text += line
-                self.render()
-            self.render()
-
-        def render(self, force: bool = False):
-            now = time.monotonic()
-            if not force and (now - self.last_update) < 0.05: return
-            content = self.text + self.tail
-            if self.in_code:
-                content += f'\n{self.indent}{self.fchar * self.flen}'
-            self.md.content = content
-            self.last_update = now
+                        self.in_code = False; self._ensure_cur_md(); self._render(force=True); self._finalize_current(); continue
+                    self._ensure_cur_md(); self._render()
+                self.prev_blank = blank
+            if data:
+                self.partial = data
+                if any(c not in ' \t' for c in data): self.had_content = True
+                self._ensure_cur_md(); self.cur_buf.append(data); self.partial_in_buf = True; self._render()
 
         def finish(self) -> str:
-            self.render(force=True)
-            return self.text + self.tail
+            if self.cur_buf and (''.join(self.cur_buf).strip() or self.in_code):
+                self._ensure_cur_md(); self._render(force=True); self._finalize_current()
+            return ''.join(self.segs)
 
+        def current_text(self) -> str:
+            return ''.join(self.segs) + ''.join(self.cur_buf)
+
+    async def run_timer(label):
+        start = time.time()
+        while s.get('streaming') and label:
+            elapsed = int(time.time() - start)
+            label.text = f"{elapsed // 60}:{(elapsed % 60):02d}"
+            await asyncio.sleep(1.0)
+
+    # Producer/consumer helpers
+    def cancel_producer():
+        t = s.get('producer_task')
+        if t and not t.done():
+            t.cancel()
+        s['producer_task'] = None
+
+    def stop_consumer():
+        tm = s.get('consumer_timer')
+        if tm:
+            with contextlib.suppress(Exception): tm.active = False
+        s['consumer_timer'] = None
+
+    def reset_stream_state():
+        cancel_producer(); stop_consumer()
+        s['stream_buffer'] = ''; s['stream_done'] = False; s['stream_error'] = None
+        s['render_pos'] = 0; s['finalized'] = False
+
+    def ensure_renderer():
+        if not s.get('renderer'):
+            cont = s.get('answer_container')
+            if not cont:
+                timer_label = show_message('assistant', '')
+                if timer_label: asyncio.create_task(run_timer(timer_label))
+                cont = s.get('answer_container')
+            s['renderer'] = StreamAssembler(cont, MD_EXTRAS, MD_ANS)
+
+    def consume():
+        try:
+            ensure_renderer()
+            buf, pos = s.get('stream_buffer',''), s.get('render_pos',0)
+            if pos < len(buf):
+                s['renderer'].feed(buf[pos:]); s['render_pos'] = len(buf)
+            if s.get('stream_done') and not s.get('finalized'):
+                renderer = s.get('renderer')
+                full = renderer.finish() if renderer else (s.get('reasoning_md').content if s.get('reasoning_md') else '')
+                full = (full or '').rstrip()
+                finish_stream(full); s['finalized'] = True; s['streaming'] = False
+                stop_consumer()
+                err = s.get('stream_error')
+                if err: ui.notify(f"Error: {err}", type='negative')
+                else:
+                    if s['chat'].parse_edit_markdown(full): show_apply_all_bubble(full)
+        except Exception:
+            pass
+
+    def start_consumer():
+        stop_consumer()
+        s['consumer_timer'] = ui.timer(0.05, consume, active=True)
 
     async def send():
         msg = (input_field.value or '').strip()
@@ -280,67 +401,64 @@ async def main_page():
         show_message('user', user_display)
         to_send = f"{user_display}\n\n{EXTRACT_ADD_ON}" if mode == 'extract' else user_display
         s['draft'] = ''; input_field.value = ''
-        timer = show_message('assistant', '')
-        start_time = time.time() if timer else None
         s['streaming'] = True; s['reasoning_mode'] = True; s['reasoning_buffer'] = ''
+        timer = show_message('assistant', '')
+        if timer: asyncio.create_task(run_timer(timer))
 
+        reset_stream_state()
         stream = s['chat'].stream_message(to_send, model_select.value, reasoning_select.value)
-        s['stream'] = stream; error_msg = None
+        s['stream'] = stream
 
-        try:
-            async for chunk in stream:
-                if timer and start_time is not None:
-                    elapsed = int(time.time() - start_time); timer.text = f"{elapsed // 60}:{(elapsed % 60):02d}"
+        async def producer():
+            error_msg = None
+            try:
+                async for chunk in stream:
+                    if isinstance(chunk, ReasoningEvent):
+                        if s.get('reasoning_mode'): update_reasoning(chunk.text)
+                        continue
+                    if s.get('reasoning_mode') and chunk:
+                        s['reasoning_mode'] = False; s['reasoning_buffer'] = ''
+                        r = s.get('reasoning_md')
+                        if r:
+                            with contextlib.suppress(Exception): r.delete()
+                        s['reasoning_md'] = None; s['renderer'] = None
+                    s['stream_buffer'] += (chunk or '')
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                error_msg = str(e)
+            finally:
+                s['stream_done'] = True; s['stream_error'] = error_msg
 
-                if not s.get('streaming'): break
-                if isinstance(chunk, ReasoningEvent):
-                    if s.get('reasoning_mode'): update_reasoning(chunk.text); continue
-
-                if s.get('reasoning_mode'):
-                    s['reasoning_mode'] = False; s['reasoning_buffer'] = ''
-                    r = s.get('reasoning_md'); 
-                    if r: 
-                        with contextlib.suppress(Exception): r.delete()
-                    s['reasoning_md'] = None
-                    with s['answer_container']:
-                        s['answer_md'] = ui.markdown('', extras=MD_EXTRAS).classes(MD_ANS)
-                    s['renderer'] = StreamAssembler(s['answer_md'])
-
-                s['renderer'].feed(chunk)
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            error_msg = str(e)
-        finally:
-            renderer = s.get('renderer')
-            full = renderer.finish() if renderer else (s.get('reasoning_md').content if s.get('reasoning_md') else '')
-            full = full or ''
-            finish_stream(full)
-
-        if error_msg: ui.notify(f"Error: {error_msg}", type='negative')
-        else:
-            if s['chat'].parse_edit_markdown(full): show_apply_all_bubble(full)
+        s['producer_task'] = asyncio.create_task(producer())
+        start_consumer()
 
     def stop_streaming():
         if not s.get('streaming'):
             ui.notify('No active response to stop', type='warning'); return
+        cancel_producer(); s['stream_done'] = True
         if s.get('reasoning_mode'):
             current = (s.get('reasoning_md').content if s.get('reasoning_md') else '') if s.get('reasoning_md') else ''
         else:
-            md = s.get('answer_md'); current = (md.content if md else '') or ''
+            r = s.get('renderer'); md = s.get('answer_md')
+            current = (r.current_text() if r else ((md.content if md else '') or ''))
         finish_stream((current or 'Response stopped.').rstrip())
+        stop_consumer(); s['finalized'] = True; s['streaming'] = False
         ui.notify('Response stopped', type='info')
 
     def clear_chat():
-        # If streaming, perform a proper stop first (same as pressing Stop)
         if s.get('streaming'): stop_streaming()
+        stop_consumer(); cancel_producer()
         with contextlib.suppress(Exception):
             b = s.pop('apply_all_bubble', None)
             if b: b.delete()
+        with contextlib.suppress(Exception):
+            stream = s.pop('stream', None)
+            if hasattr(stream, 'aclose'): asyncio.create_task(stream.aclose())
+        reset_stream_state()
         s['pending_edits_text'] = None; s['last_edit_round_status'] = None
         s['chat'] = ChatClient(); s['draft'] = ''
-        for k in ('answer_md','answer_container','reasoning_md','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode','stream','renderer'): s.pop(k, None)
+        for k in ('answer_md','answer_container','reasoning_md','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode','renderer'): s.pop(k, None)
         s['answer_counter'] = 0; s['msg_counter'] = 0; s['file_results'] = []; s['file_idx'] = -1; s['edit_history'] = []
         with contextlib.suppress(Exception): input_field.value = ''
         c = s.get('container')
@@ -476,10 +594,8 @@ async def main_page():
         elif key == 'Enter':
             q = (file_search.value or '').strip()
             if q and looks_like_url(q): await attach_url(q); return
-            # Wildcard pattern: attach all matches
             if '*' in q:
                 try:
-                    # Refresh results in case debounce hasn't populated yet
                     s['file_results'] = search_files(q) or []
                     results = s['file_results']; n = len(results)
                 except Exception:
@@ -505,6 +621,7 @@ async def main_page():
                 s['chat'].files.append(p); show_file(p); added = True
         file_search.value = ''; s['file_idx'] = -1; s['file_results'] = []; file_results_container.clear(); focus_file_search()
 
+    # Layout
     with ui.element('div').classes('fixed-header'):
         with ui.row().classes('gap-4 p-3 w-full'):
             model_select = ui.select(MODELS, label='Model').props(P).classes('text-white w-56').bind_value(app.storage.tab, 'model')
@@ -518,7 +635,13 @@ async def main_page():
     with chat_stack:
         s['container_id'] = f'chat-{time.time_ns()}'
         s['container'] = ui.column().classes('chat-container').props(f'id={s["container_id"]}')
-    refresh_ui(); init_code_copy_buttons()
+    refresh_ui()
+
+    def reattach_consumer_if_needed():
+        if (s.get('stream_buffer') or s.get('reasoning_buffer')) and not s.get('finalized'):
+            start_consumer()
+
+    reattach_consumer_if_needed()
 
     with ui.element('div').classes('chat-footer'):
         with ui.row().classes('w-full p-3 gap-2'):
