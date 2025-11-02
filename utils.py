@@ -1,4 +1,4 @@
-import os, json, asyncio, contextlib, re, tempfile
+import os, json, asyncio, contextlib, re, tempfile, glob
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set, AsyncGenerator, Union
 from dataclasses import dataclass, field
@@ -13,10 +13,41 @@ DEFAULT_MODEL = "openai/gpt-5"
 MODELS = ["openai/gpt-5", "openai/gpt-5-mini", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast", "openai/gpt-5-pro", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
-def search_files(query: str, base_path: Optional[str] = None, max_results: int = 10) -> List[str]:
+def search_files(query: str, base_path: Optional[str] = None, max_results: int = 20) -> List[str]:
     if not query or len(query) < 2: return []
     default_base = Path(__file__).resolve().parent.parent
     home = Path(base_path) if base_path else default_base
+
+    # Wildcard mode: '*' or '?' present -> match against full relative paths, with '*' spanning directories
+    if any(ch in query for ch in ('*','?')):
+        pat = os.path.expanduser(query.strip())
+
+        def to_regex(p: str) -> re.Pattern:
+            p = p.replace('\\', '/')
+            buf = []
+            for ch in p:
+                if ch == '*': buf.append('.*')
+                elif ch == '?': buf.append('.')
+                else: buf.append(re.escape(ch))
+            return re.compile('^' + ''.join(buf) + '$', re.IGNORECASE)
+
+        rx = to_regex(pat)
+        results: List[str] = []
+        try:
+            for item in home.rglob('*'):
+                try:
+                    if not item.is_file(): continue
+                    rel = item.relative_to(home).as_posix()
+                    absp = item.resolve().as_posix()
+                    if rx.match(rel) or rx.match(absp):
+                        results.append(str(item))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return sorted(set(results))
+
+    # Non-wildcard mode: fast substring match on filename with extension whitelist and truncation
     results, q = [], query.lower()
     WHITELIST_EXTS = {'.py', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h', '.go', '.cs', '.java', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.html', '.rs', '.md', '.sql'}
     try:
@@ -28,9 +59,12 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
                 if q not in item.name.lower(): continue
                 if item.suffix.lower() not in WHITELIST_EXTS: continue
                 results.append(str(item))
-            except Exception: continue
-    except Exception: pass
+            except Exception:
+                continue
+    except Exception:
+        pass
     return sorted(set(results))[:max_results]
+
 
 def read_files(file_paths: List[str]) -> str:
     if not file_paths: return ""

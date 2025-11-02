@@ -24,7 +24,7 @@ Instead of making broader edits to fix issues or changing the approach or style,
 Your whole answer will be markdown formatted. As such, adhere to the following rules:
 For code, always use inline code specifiers (`) or code fences (```). Always specify the language for multi-line code. 
 For any and all formulas, equations, mathematical expressions, etc, always use LaTeX, no matter how short or long. For LaTeX, only dollar sign $ delimiters are supported, either inline (single $) or display (double $) math modes - square brackets are not supported.
-Use markdown tables and mermaid diagrams when appropriate. In mermaid, remember not to use semicolons in text as they are separators.
+Use markdown tables and mermaid diagrams when appropriate. Remember that in mermaid, semicolons, parentheses and commas are syntax and may create errors when used in labels.
 
 Finally, As you think through your colleague's request and prepare your answer, consider whether it adheres to all the instructions and guidelines above and refine it until it does.
 

@@ -476,6 +476,16 @@ async def main_page():
         elif key == 'Enter':
             q = (file_search.value or '').strip()
             if q and looks_like_url(q): await attach_url(q); return
+            # Wildcard pattern: attach all matches
+            if '*' in q:
+                try:
+                    # Refresh results in case debounce hasn't populated yet
+                    s['file_results'] = search_files(q) or []
+                    results = s['file_results']; n = len(results)
+                except Exception:
+                    results, n = [], 0
+                if n == 0: return
+                attach_multiple(results); return
             i = s.get('file_idx', -1)
             if n == 0: return
             if not (0 <= i < n): i = 0
@@ -486,6 +496,13 @@ async def main_page():
     def select_file(path):
         if path not in s['chat'].files:
             s['chat'].files.append(path); show_file(path)
+        file_search.value = ''; s['file_idx'] = -1; s['file_results'] = []; file_results_container.clear(); focus_file_search()
+
+    def attach_multiple(paths):
+        added = False
+        for p in paths:
+            if p not in s['chat'].files:
+                s['chat'].files.append(p); show_file(p); added = True
         file_search.value = ''; s['file_idx'] = -1; s['file_results'] = []; file_results_container.clear(); focus_file_search()
 
     with ui.element('div').classes('fixed-header'):
