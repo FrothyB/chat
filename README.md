@@ -38,6 +38,7 @@ A fast, developer-focused AI chat app with file context, web page scraping, and 
 - Add files
   - Use the “Search files or paste URL...” box
   - Type at least 2 chars to search; arrows to navigate; Enter to attach
+  - Use glob patterns with `*` (matches any characters, including across directories) or `?` (matches single character), e.g., `*.py` for all Python files or `src/**/*.md` for Markdown files in `src` recursively; press Enter to attach all matches
   - Attached files are shown as green chips; click × to remove
 - Add web pages
   - Paste a URL in the same box and press Enter
