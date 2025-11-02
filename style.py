@@ -6,7 +6,7 @@ body, .q-page { background: #0b0f14 !important; }
 .chat-container::-webkit-scrollbar-thumb:hover { background: #666; }
 .prose { color: #e2e8f0 !important; }
 .prose pre { background-color: #111827; color: #e2e8f0; padding: 0.875rem; border-radius: 0.5rem; overflow-x: auto; }
-.prose code { background-color: #1f2937; color: #a8b3cf; padding: 0.875rem; border-radius: 0.5rem; }
+.prose code { background-color: #1f2937; color: #a8b3cf; padding: 0.125rem 0.35rem; border-radius: 0.375rem; }
 .prose pre code { background-color: transparent; color: inherit; padding: 0; }
 .edit-bubble { background: #1e3a5f; border: 1px solid #2563eb; border-radius: 0.5rem; 
                 padding: 0.5rem; margin: 0.25rem; display: inline-flex; align-items: center; gap: 0.5rem; }
@@ -35,17 +35,4 @@ body, .q-page { background: #0b0f14 !important; }
 .answer-bubble .q-markdown,.answer-bubble .prose,.user-bubble .q-markdown,.user-bubble .prose{max-width:100%;overflow-wrap:anywhere;word-break:break-word}
 .answer-bubble pre,.user-bubble pre,.answer-bubble pre code,.user-bubble pre code,.answer-bubble code,.user-bubble code{white-space:pre-wrap!important;overflow-wrap:anywhere;word-break:break-word}
 .file-option.active{background:rgb(55,65,81)} .file-option:hover{background:rgb(45,55,72)}
-.no-gap { gap: 0 !important; }
-</style>
-'''
-# /* Remove vertical padding from markdown containers and elements */
-# .prose, .q-markdown { padding-top: 0 !important; padding-bottom: 0 !important; }
-# .prose > * { padding-top: 0 !important; padding-bottom: 0 !important; }
-
-# /* Collapse extra vertical space between streamed markdown chunks without changing intra-chunk styling */
-# .answer-content.no-gap > .q-markdown { margin: 0 !important; padding: 0 !important; }
-# .answer-content.no-gap > .q-markdown + .q-markdown { margin-top: 0 !important; }
-# .answer-content.no-gap > .q-markdown .prose { margin: 0 !important; }
-# .answer-content.no-gap > .q-markdown .prose > :first-child { margin-top: 0 !important; }
-# .answer-content.no-gap > .q-markdown .prose > :last-child { margin-bottom: 0 !important; }
-# </style>'''
+</style>'''
