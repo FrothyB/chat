@@ -119,7 +119,7 @@ async def main_page():
                 with ui.element('div').classes('flex justify-start mb-3'):
                     with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble').props(f'id={aid}'):
                         if is_stream:
-                            ans_container = ui.column().classes('answer-content')
+                            ans_container = ui.column().classes('answer-content no-gap')
                             with ans_container:
                                 if s.get('reasoning_mode'):
                                     reasoning_md = ui.markdown(s.get('reasoning_buffer',''), extras=MD_EXTRAS).classes(MD_ANS)
