@@ -13,23 +13,23 @@ async def main_page():
     # Persistent state
     s.setdefault('chat', ChatClient()); s.setdefault('draft', ''); s.setdefault('model', DEFAULT_MODEL)
     s.setdefault('reasoning', 'medium'); s.setdefault('mode', 'chat'); s.setdefault('streaming', False)
-    s.setdefault('reasoning_mode', False); s.setdefault('reasoning_buffer', ''); s.setdefault('answer_counter', 0)
-    s.setdefault('msg_counter', 0); s.setdefault('file_results', []); s.setdefault('file_idx', -1)
-    s.setdefault('edit_history', []); s.setdefault('pending_edits_text', None); s.setdefault('apply_all_bubble', None)
-    s.setdefault('last_edit_round_status', None)
+    s.setdefault('answer_counter', 0); s.setdefault('msg_counter', 0); s.setdefault('file_results', [])
+    s.setdefault('file_idx', -1); s.setdefault('edit_history', []); s.setdefault('pending_edits_text', None)
+    s.setdefault('apply_all_bubble', None); s.setdefault('last_edit_round_status', None)
 
     # Streaming producer/consumer state (persists across reconnects)
     s.setdefault('session_id', str(uuid.uuid4()))
-    s.setdefault('stream_buffer', '')
+    s.setdefault('stream_buffer', [])
     s.setdefault('stream_done', False)
     s.setdefault('stream_error', None)
     s.setdefault('render_pos', 0)
     s.setdefault('finalized', False)
     s.setdefault('producer_task', None)
     s.setdefault('consumer_timer', None)
+    s.setdefault('answer_started', False)
 
     # Ephemeral UI state
-    for k in ('container','container_id','answer_md','answer_container','reasoning_md','answer_id','stream','renderer'):
+    for k in ('container','container_id','answer_md','answer_container','answer_id','stream','renderer'):
         s.pop(k, None)
 
     ui.add_head_html(STYLE_CSS)
@@ -84,15 +84,6 @@ async def main_page():
         '''
         ui.run_javascript(js)
 
-    def update_reasoning(text: str | None):
-        if not text or not s.get('reasoning_mode'): return
-        s['reasoning_buffer'] = (s.get('reasoning_buffer') or '') + text
-        md = s.get('reasoning_md'); now = time.monotonic(); last = s.get('reasoning_last_update') or 0.0
-        if md and (now - last) >= 0.08:
-            with contextlib.suppress(Exception):
-                md.content = s['reasoning_buffer']
-            s['reasoning_last_update'] = now
-
     def build_tools(target_id: str, with_timer: bool = False, get_text=None):
         tools = ui.element('div').classes('answer-tools').props(f'id={target_id}-tools'); timer = None
         with tools:
@@ -120,17 +111,12 @@ async def main_page():
                     with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble').props(f'id={aid}'):
                         if is_stream:
                             ans_container = ui.column().classes('answer-content no-gap')
-                            with ans_container:
-                                if s.get('reasoning_mode'):
-                                    reasoning_md = ui.markdown(s.get('reasoning_buffer',''), extras=MD_EXTRAS).classes(MD_ANS)
-                                else:
-                                    reasoning_md = None
                             s['answer_id'] = aid; s['answer_container'] = ans_container
-                            s['reasoning_md'] = reasoning_md; s['answer_md'] = None; s['renderer'] = None
+                            s['answer_md'] = None; s['renderer'] = None
                             def getter():
                                 r = s.get('renderer')
                                 if r: return r.current_text()
-                                md = s.get('answer_md') or s.get('reasoning_md')
+                                md = s.get('answer_md')
                                 return md.content if md else ''
                         else:
                             md = ui.markdown(content, extras=MD_EXTRAS).classes(MD_ANS); getter = lambda m=md: m.content
@@ -205,10 +191,7 @@ async def main_page():
         with contextlib.suppress(Exception):
             stream = s.pop('stream', None)
             if hasattr(stream, 'aclose'): asyncio.create_task(stream.aclose())
-        with contextlib.suppress(Exception):
-            r = s.pop('reasoning_md', None)
-            if r: r.delete()
-        for k in ('answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode'): s.pop(k, None)
+        for k in ('answer_id',): s.pop(k, None)
 
     async def apply_edits_from_response(full_text: str):
         try:
@@ -246,6 +229,7 @@ async def main_page():
             self.in_code = False; self.indent = ''; self.fchar = ''; self.flen = 0
             self.prev_blank = True; self.had_content = False
             self.last_update = 0.0; self.partial = ''; self.partial_in_buf = False
+            self.just_closed_code = False
 
         def _open_match(self, line: str):
             return re.match(r'^( {0,3})(`{3,}|~{3,})([^\r\n]*)\r?\n$', line)
@@ -264,14 +248,13 @@ async def main_page():
 
         def _render(self, force: bool = False):
             now = time.monotonic()
-            size = sum(map(len, self.cur_buf))
-            interval = 0.05 # if size < 2_000 else 0.08 if size < 10_000 else 0.20
+            interval = 0.05
             if not force and (now - self.last_update) < interval: return
             if not self.cur_md: return
             content = ''.join(self.cur_buf)
             if self.in_code: content += f'\n{self.indent}{self.fchar * self.flen}\n'
             with contextlib.suppress(Exception):
-                self.cur_md.content = content
+                self.cur_md.set_content(content)
             self.last_update = now
 
         def _finalize_current(self):
@@ -283,6 +266,7 @@ async def main_page():
             else:
                 with contextlib.suppress(Exception): self.cur_md.delete()
             self.cur_md = None; self.cur_buf.clear(); self.prev_blank = True; self.had_content = False
+            self.just_closed_code = False
 
         def feed(self, chunk: str):
             if not chunk: return
@@ -300,21 +284,35 @@ async def main_page():
                         self.indent, fence, _ = m.groups()
                         self.fchar, self.flen = fence[0], len(fence)
                         self.in_code = True; self.cur_buf.append(line); self.had_content = True
+                        self.just_closed_code = False
                         self._ensure_cur_md(); self._render(force=True); continue
                     self.cur_buf.append(line)
-                    if not blank: self.had_content = True
+                    if not blank:
+                        self.had_content = True
+                        self.just_closed_code = False
                     if blank and self.had_content and not self.in_code and not self.prev_blank:
-                        self._ensure_cur_md(); self._render(force=True); self._finalize_current(); continue
+                        cur_size = sum(map(len, self.cur_buf))
+                        if cur_size >= 2000 and not self.just_closed_code:
+                            self._ensure_cur_md(); self._render(force=True); self._finalize_current(); continue
                     self._ensure_cur_md(); self._render()
                 else:
                     self.cur_buf.append(line)
                     if self._close_match(line):
-                        self.in_code = False; self._ensure_cur_md(); self._render(force=True); self._finalize_current(); continue
+                        self.in_code = False
+                        self._ensure_cur_md(); self._render(force=True)
+                        self.just_closed_code = True
+                        cur_size = sum(map(len, self.cur_buf))
+                        if cur_size >= 2000:
+                            self._ensure_cur_md(); self._render(force=True); self._finalize_current()
+                            continue
+                        continue
                     self._ensure_cur_md(); self._render()
                 self.prev_blank = blank
             if data:
                 self.partial = data
-                if any(c not in ' \t' for c in data): self.had_content = True
+                if any(c not in ' \t' for c in data):
+                    self.had_content = True
+                    if not self.in_code: self.just_closed_code = False
                 self._ensure_cur_md(); self.cur_buf.append(data); self.partial_in_buf = True; self._render()
 
         def finish(self) -> str:
@@ -347,8 +345,8 @@ async def main_page():
 
     def reset_stream_state():
         cancel_producer(); stop_consumer()
-        s['stream_buffer'] = ''; s['stream_done'] = False; s['stream_error'] = None
-        s['render_pos'] = 0; s['finalized'] = False
+        s['stream_buffer'] = []; s['stream_done'] = False; s['stream_error'] = None
+        s['render_pos'] = 0; s['finalized'] = False; s['answer_started'] = False
 
     def ensure_renderer():
         if not s.get('renderer'):
@@ -362,12 +360,15 @@ async def main_page():
     def consume():
         try:
             ensure_renderer()
-            buf, pos = s.get('stream_buffer',''), s.get('render_pos',0)
-            if pos < len(buf):
-                s['renderer'].feed(buf[pos:]); s['render_pos'] = len(buf)
+            chunks, pos = s.get('stream_buffer', []), s.get('render_pos', 0)
+            if pos < len(chunks):
+                r = s.get('renderer')
+                if r:
+                    for c in chunks[pos:]: r.feed(c)
+                    s['render_pos'] = len(chunks)
             if s.get('stream_done') and not s.get('finalized'):
                 renderer = s.get('renderer')
-                full = renderer.finish() if renderer else (s.get('reasoning_md').content if s.get('reasoning_md') else '')
+                full = renderer.finish() if renderer else ''
                 full = (full or '').rstrip()
                 finish_stream(full); s['finalized'] = True; s['streaming'] = False
                 stop_consumer()
@@ -401,7 +402,7 @@ async def main_page():
         show_message('user', user_display)
         to_send = f"{user_display}\n\n{EXTRACT_ADD_ON}" if mode == 'extract' else user_display
         s['draft'] = ''; input_field.value = ''
-        s['streaming'] = True; s['reasoning_mode'] = True; s['reasoning_buffer'] = ''
+        s['streaming'] = True
         timer = show_message('assistant', '')
         if timer: asyncio.create_task(run_timer(timer))
 
@@ -414,15 +415,19 @@ async def main_page():
             try:
                 async for chunk in stream:
                     if isinstance(chunk, ReasoningEvent):
-                        if s.get('reasoning_mode'): update_reasoning(chunk.text)
+                        if not s.get('answer_started'):
+                            s['stream_buffer'].append(chunk.text or '')
                         continue
-                    if s.get('reasoning_mode') and chunk:
-                        s['reasoning_mode'] = False; s['reasoning_buffer'] = ''
-                        r = s.get('reasoning_md')
-                        if r:
-                            with contextlib.suppress(Exception): r.delete()
-                        s['reasoning_md'] = None; s['renderer'] = None
-                    s['stream_buffer'] += (chunk or '')
+                    # First non-reasoning token
+                    if not s.get('answer_started'):
+                        s['answer_started'] = True
+                        # Clear previously rendered reasoning and reset buffer/index
+                        cont = s.get('answer_container')
+                        if cont:
+                            with contextlib.suppress(Exception): cont.clear()
+                        s['renderer'] = None
+                        s['stream_buffer'] = []; s['render_pos'] = 0
+                    s['stream_buffer'].append(chunk or '')
             except asyncio.CancelledError:
                 pass
             except Exception as e:
@@ -437,11 +442,8 @@ async def main_page():
         if not s.get('streaming'):
             ui.notify('No active response to stop', type='warning'); return
         cancel_producer(); s['stream_done'] = True
-        if s.get('reasoning_mode'):
-            current = (s.get('reasoning_md').content if s.get('reasoning_md') else '') if s.get('reasoning_md') else ''
-        else:
-            r = s.get('renderer'); md = s.get('answer_md')
-            current = (r.current_text() if r else ((md.content if md else '') or ''))
+        r = s.get('renderer'); md = s.get('answer_md')
+        current = (r.current_text() if r else ((md.content if md else '') or ''))
         finish_stream((current or 'Response stopped.').rstrip())
         stop_consumer(); s['finalized'] = True; s['streaming'] = False
         ui.notify('Response stopped', type='info')
@@ -458,7 +460,7 @@ async def main_page():
         reset_stream_state()
         s['pending_edits_text'] = None; s['last_edit_round_status'] = None
         s['chat'] = ChatClient(); s['draft'] = ''
-        for k in ('answer_md','answer_container','reasoning_md','answer_id','reasoning_buffer','reasoning_last_update','reasoning_mode','renderer'): s.pop(k, None)
+        for k in ('answer_md','answer_container','answer_id','renderer'): s.pop(k, None)
         s['answer_counter'] = 0; s['msg_counter'] = 0; s['file_results'] = []; s['file_idx'] = -1; s['edit_history'] = []
         with contextlib.suppress(Exception): input_field.value = ''
         c = s.get('container')
@@ -638,7 +640,7 @@ async def main_page():
     refresh_ui()
 
     def reattach_consumer_if_needed():
-        if (s.get('stream_buffer') or s.get('reasoning_buffer')) and not s.get('finalized'):
+        if (s.get('stream_buffer') or []) and not s.get('finalized'):
             start_consumer()
 
     reattach_consumer_if_needed()
