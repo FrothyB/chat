@@ -10,7 +10,7 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-5.1"
-MODELS = ["openai/gpt-5.1", "openai/gpt-5-mini", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast", "openai/gpt-5-pro", "openai/gpt-oss-120b"]
+MODELS = ["openai/gpt-5.1", "openai/gpt-5.1-codex", "openai/gpt-5.1-codex-mini", "openai/gpt-5-pro", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 20) -> List[str]:
