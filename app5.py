@@ -151,193 +151,6 @@ async def fetch_url_content(url: str) -> Path:
     path.write_text(content, encoding='utf-8')
     return path
 
-class StreamAssembler:
-    def __init__(self, container, extras, css_class):
-        self.container = container
-        self.extras = extras
-        self.css_class = css_class
-        self.cur_md = None
-        self.cur_buf = []          # logical markdown (no fake fences)
-        self.r_buf = []            # rendered markdown (may contain fake fences)
-        self.segs = []             # completed segments
-        self.cur_len = 0           # total length of cur_buf contents
-        self.in_code = False
-        self.indent = ''
-        self.fchar = ''
-        self.flen = 0
-        self.info = ''             # language/info string after opening fence
-        self.prev_blank = True
-        self.had_content = False
-        self.last_update = 0.0
-        self.partial = ''
-        self.partial_in_buf = False
-        self.just_closed_code = False
-        self.auto_render = False   # only render explicitly when stream backlog is flushed
-
-    def _open_match(self, line: str):
-        return re.match(r'^( {0,3})(`{3,}|~{3,})([^\r\n]*)\r?\n$', line)
-
-    def _close_match(self, line: str):
-        if not self.in_code: return False
-        m = re.match(r'^( {0,3})(`{3,}|~{3,})[ \t]*\r?\n$', line)
-        if not m: return False
-        fence = m.group(2)
-        return fence[0] == self.fchar and len(fence) >= self.flen
-
-    def _ensure_cur_md(self):
-        if self.cur_md: return
-        with self.container:
-            self.cur_md = ui.markdown('', extras=self.extras).classes(self.css_class)
-
-    def _render(self, force: bool = False):
-        if not self.cur_md: return
-        if not force:
-            if not self.auto_render: return
-            now = time.monotonic()
-            if (now - self.last_update) < 0.05: return
-        else:
-            now = time.monotonic()
-        content = ''.join(self.r_buf)
-        if self.in_code:
-            content += f'\n{self.indent}{self.fchar * self.flen}\n'
-        with contextlib.suppress(Exception):
-            self.cur_md.set_content(content)
-        self.last_update = now
-
-    def _finalize_current(self):
-        if not self.cur_md:
-            self.cur_buf.clear()
-            self.r_buf.clear()
-            self.cur_len = 0
-            self.prev_blank = True
-            self.had_content = False
-            return
-        self._render(force=True)
-        text = ''.join(self.cur_buf)
-        if text.strip():
-            self.segs.append(text)
-        else:
-            with contextlib.suppress(Exception): self.cur_md.delete()
-        self.cur_md = None
-        self.cur_buf.clear()
-        self.r_buf.clear()
-        self.cur_len = 0
-        self.prev_blank = True
-        self.had_content = False
-        self.just_closed_code = False
-
-    def feed(self, chunk: str):
-        if not chunk: return
-        if self.partial_in_buf and self.cur_buf:
-            last = self.cur_buf.pop()
-            self.cur_len -= len(last)
-            if self.r_buf: self.r_buf.pop()
-            self.partial_in_buf = False
-
-        data = (self.partial or '') + chunk
-        self.partial = ''
-
-        while True:
-            i = data.find('\n')
-            if i == -1: break
-            line = data[:i+1]
-            data = data[i+1:]
-            blank = bool(re.match(r'^[ \t]*\r?\n$', line))
-
-            if not self.in_code:
-                m = self._open_match(line)
-                if m:
-                    self.indent, fence, info = m.groups()
-                    self.fchar, self.flen = fence[0], len(fence)
-                    self.info = info or ''
-                    self.in_code = True
-                    self.cur_buf.append(line)
-                    self.cur_len += len(line)
-                    self.r_buf.append(line)
-                    self.had_content = True
-                    self.just_closed_code = False
-                    self._ensure_cur_md()
-                    self._render(force=True)
-                    continue
-
-                self.cur_buf.append(line)
-                self.cur_len += len(line)
-                self.r_buf.append(line)
-                if not blank:
-                    self.had_content = True
-                    self.just_closed_code = False
-
-                if blank and self.had_content and not self.in_code and not self.prev_blank:
-                    cur_size = self.cur_len
-                    if cur_size >= 2000 and not self.just_closed_code:
-                        self._ensure_cur_md()
-                        self._render(force=True)
-                        self._finalize_current()
-                        continue
-                self._ensure_cur_md()
-                self._render()
-            else:
-                self.cur_buf.append(line)
-                self.r_buf.append(line)
-                if self._close_match(line):
-                    self.in_code = False
-                    self._ensure_cur_md()
-                    self._render(force=True)
-                    self.just_closed_code = True
-                    cur_size = self.cur_len
-                    if cur_size >= 2000:
-                        self._ensure_cur_md()
-                        self._render(force=True)
-                        self._finalize_current()
-                        continue
-                    continue
-
-                # fake split on double newline inside a code fence
-                if blank and self.prev_blank:
-                    cur_size = self.cur_len
-                    if cur_size >= 2000:
-                        close_line = f'{self.indent}{self.fchar * self.flen}\n'
-                        open_line = f'{self.indent}{self.fchar * self.flen}{self.info}\n'
-                        self.r_buf.append(close_line)
-                        saved_state = (self.indent, self.fchar, self.flen, self.info)
-                        self.in_code = False
-                        self._ensure_cur_md()
-                        self._render(force=True)
-                        self._finalize_current()
-                        self.in_code = True
-                        self.indent, self.fchar, self.flen, self.info = saved_state
-                        self._ensure_cur_md()
-                        self.r_buf.append(open_line)
-                        self._render(force=True)
-                        self.prev_blank = False
-                        continue
-
-                self._ensure_cur_md()
-                self._render()
-            self.prev_blank = blank
-
-        if data:
-            self.partial = data
-            if any(c not in ' \t' for c in data):
-                self.had_content = True
-                if not self.in_code: self.just_closed_code = False
-            self._ensure_cur_md()
-            self.cur_buf.append(data)
-            self.cur_len += len(data)
-            self.r_buf.append(data)
-            self.partial_in_buf = True
-            self._render()
-
-    def finish(self) -> str:
-        if self.cur_buf and (''.join(self.cur_buf).strip() or self.in_code):
-            self._ensure_cur_md()
-            self._render(force=True)
-            self._finalize_current()
-        return ''.join(self.segs)
-
-    def current_text(self) -> str:
-        return ''.join(self.segs) + ''.join(self.cur_buf)
-
 async def run_timer(label, storage_tab):
     start = time.time()
     while storage_tab.get('streaming') and label:
@@ -364,13 +177,13 @@ async def main_page():
         'session_id': str(uuid.uuid4()), 'stream_buffer': [],
         'stream_done': False, 'stream_error': None, 'render_pos': 0,
         'finalized': False, 'producer_task': None, 'consumer_timer': None,
-        'answer_started': False
+        'answer_started': False, 'last_render_time': 0.0,
     }
     for k, v in defaults.items():
         s.setdefault(k, v)
 
     # Ephemeral state cleanup
-    for k in ('container', 'container_id', 'answer_md', 'answer_container', 'answer_id', 'stream', 'renderer'):
+    for k in ('container', 'container_id', 'answer_md', 'answer_container', 'answer_id', 'stream'):
         s.pop(k, None)
 
     ui.add_head_html(STYLE_CSS)
@@ -415,14 +228,14 @@ async def main_page():
                 with ui.element('div').classes('flex justify-start mb-3'):
                     with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble').props(f'id={aid}'):
                         if is_stream:
+                            # Single markdown block for streaming
                             ans_container = ui.column().classes('answer-content no-gap')
                             s['answer_id'] = aid
                             s['answer_container'] = ans_container
-                            s['answer_md'] = None
-                            s['renderer'] = None
+                            with ans_container:
+                                md = ui.markdown('', extras=MD_EXTRAS).classes(MD_CLASSES)
+                            s['answer_md'] = md
                             def getter():
-                                r = s.get('renderer')
-                                if r: return r.current_text()
                                 md = s.get('answer_md')
                                 return md.content if md else ''
                         else:
@@ -487,23 +300,14 @@ async def main_page():
             show_edit_bubble(item['path'], item.get('status', 'success'), item.get('info', ''), record=False)
 
     def finish_stream(full_text: str):
-        renderer = s.pop('renderer', None)
-        if renderer:
-            with contextlib.suppress(Exception):
-                if not full_text: full_text = renderer.finish()
-                else: renderer.finish()
-        
         full_text = (full_text or '').rstrip() or 'Response stopped.'
         with contextlib.suppress(Exception):
             s['chat'].ensure_last_assistant_nonempty(full_text)
 
-        cont = s.get('answer_container')
-        if cont:
-            cont.clear()
-            with cont:
-                final_md = ui.markdown(full_text, extras=MD_EXTRAS).classes(MD_CLASSES)
-            s['answer_md'] = final_md
+        md = s.get('answer_md')
+        if md:
             with contextlib.suppress(Exception):
+                md.set_content(full_text)
                 scan_code_copy_buttons(s.get('answer_id', ''))
 
         s['streaming'] = False
@@ -568,6 +372,13 @@ async def main_page():
 
     # --- Streaming Logic ---
 
+    _CODE_FENCE_RE = re.compile(r'(?m)^\s*```')
+
+    def with_temp_code_fence(text: str) -> str:
+        if not text or len(_CODE_FENCE_RE.findall(text)) % 2 == 0:
+            return text
+        return text + ('```' if text.endswith('\n') else '\n```')
+    
     def cancel_producer():
         t = s.get('producer_task')
         if t and not t.done(): t.cancel()
@@ -588,31 +399,40 @@ async def main_page():
         s['render_pos'] = 0
         s['finalized'] = False
         s['answer_started'] = False
+        s['last_render_time'] = 0.0
 
-    def ensure_renderer():
-        if not s.get('renderer'):
+    def ensure_answer_md():
+        if not s.get('answer_md'):
             cont = s.get('answer_container')
             if not cont:
                 timer_label = show_message('assistant', '')
                 if timer_label: asyncio.create_task(run_timer(timer_label, s))
                 cont = s.get('answer_container')
-            s['renderer'] = StreamAssembler(cont, MD_EXTRAS, MD_CLASSES)
+            if cont:
+                with cont:
+                    md = ui.markdown('', extras=MD_EXTRAS).classes(MD_CLASSES)
+                s['answer_md'] = md
 
     def consume():
         try:
-            ensure_renderer()
+            ensure_answer_md()
             chunks, pos = s.get('stream_buffer', []), s.get('render_pos', 0)
-            r = s.get('renderer')
-            if r and pos < len(chunks):
-                for c in chunks[pos:]: r.feed(c)
-                s['render_pos'] = len(chunks)
-                # Only render when we've caught up with the current stream buffer
-                if s['render_pos'] >= len(s.get('stream_buffer', [])):
-                    r._render(force=True)
-            
+            n = len(chunks)
+            if pos < n:
+                s['render_pos'] = n
+                text = ''.join(chunks)
+                md = s.get('answer_md')
+                if md:
+                    now = time.monotonic()
+                    last = s.get('last_render_time', 0.0)
+                    # Throttle updates; always flush on completion
+                    if (now - last) >= 0.05 or s.get('stream_done'):
+                        with contextlib.suppress(Exception):
+                            md.set_content(with_temp_code_fence(text))                        
+                            s['last_render_time'] = now
+
             if s.get('stream_done') and not s.get('finalized'):
-                renderer = s.get('renderer')
-                full = renderer.finish() if renderer else ''
+                full = ''.join(s.get('stream_buffer') or [])
                 full = (full or '').rstrip()
                 finish_stream(full)
                 s['finalized'] = True
@@ -667,7 +487,7 @@ async def main_page():
                         cont = s.get('answer_container')
                         if cont:
                             with contextlib.suppress(Exception): cont.clear()
-                        s['renderer'] = None
+                        s['answer_md'] = None
                         s['stream_buffer'] = []
                         s['render_pos'] = 0
                     
@@ -689,9 +509,8 @@ async def main_page():
             return
         cancel_producer()
         s['stream_done'] = True
-        r = s.get('renderer')
         md = s.get('answer_md')
-        current = (r.current_text() if r else ((md.content if md else '') or ''))
+        current = ''.join(s.get('stream_buffer') or []) or ((md.content if md else '') or '')
         finish_stream((current or 'Response stopped.').rstrip())
         stop_consumer()
         s['finalized'] = True
@@ -713,7 +532,7 @@ async def main_page():
         s['chat'] = ChatClient()
         s['draft'] = ''
         
-        for k in ('answer_md', 'answer_container', 'answer_id', 'renderer'):
+        for k in ('answer_md', 'answer_container', 'answer_id'):
             s.pop(k, None)
         
         s['answer_counter'] = 0
