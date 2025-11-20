@@ -13,7 +13,7 @@ from nicegui import app, ui
 
 from utils import (
     ChatClient, search_files, STYLE_CSS, MODELS, REASONING_LEVELS,
-    DEFAULT_MODEL, EXTRACT_ADD_ON, ReasoningEvent
+    DEFAULT_MODEL, EXTRACT_ADD_ON, ReasoningEvent, FILE_LIKE_EXTS
 )
 
 # --- Constants & Config ---
@@ -67,17 +67,56 @@ HEAD_CSS = '''
 
 # --- Helpers ---
 
+_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*://')
+_BARE_DOMAIN_RE = re.compile(r'^([\w.-]+)\.([a-zA-Z]{2,})$')
+_WIN_DRIVE_RE = re.compile(r'^[a-zA-Z]:[\\/]|^\\\\')  # C:\foo or \\server\share
+
+
 def looks_like_url(sv: str) -> bool:
-    if not sv or ' ' in sv: return False
-    u = sv.strip()
-    if not re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', u):
-        if re.match(r'^[\w.-]+\.[a-zA-Z]{2,}(/|$)', u): u = 'http://' + u
-        else: return False
-    try:
-        p = urlparse(u)
-        return p.scheme in ('http', 'https') and bool(p.netloc)
-    except Exception:
+    if not sv:
         return False
+    u = sv.strip()
+    if not u or ' ' in u:
+        return False
+
+    # 1) Already has a scheme -> rely on urlparse, but only accept http/https
+    if _SCHEME_RE.match(u):
+        try:
+            p = urlparse(u)
+        except Exception:
+            return False
+        return p.scheme in ('http', 'https') and bool(p.netloc)
+
+    # 2) Obvious local/OS path patterns -> not a URL
+    if (
+        u.startswith(('.', '/', '~'))  # ./foo, /etc/hosts, ~/file
+        or '\\' in u                   # any Windows-style separator
+        or _WIN_DRIVE_RE.match(u)      # C:\foo, \\server\share
+    ):
+        return False
+
+    # 3) Bare domain like "example.com"
+    m = _BARE_DOMAIN_RE.match(u)
+    if m:
+        ext = '.' + m.group(2).lower()
+        if ext in FILE_LIKE_EXTS:
+            # Looks like a filename (e.g. app5.py), not a URL
+            return False
+        try:
+            p = urlparse('http://' + u)
+        except Exception:
+            return False
+        return bool(p.netloc)
+
+    # 4) Heuristic: contains URL-ish punctuation -> try as host/path
+    if any(ch in u for ch in '/?#:'):
+        try:
+            p = urlparse('http://' + u)
+        except Exception:
+            return False
+        return bool(p.netloc)
+
+    return False
 
 def normalize_url(u: str) -> str:
     u = u.strip()

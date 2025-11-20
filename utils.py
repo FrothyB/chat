@@ -10,8 +10,10 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-5.1"
-MODELS = ["google/gemini-3-pro-preview", "openai/gpt-5.1", "openai/gpt-5.1-codex", "openai/gpt-5.1-codex-mini", "openai/gpt-5-pro", "anthropic/claude-4.5-sonnet", "x-ai/grok-4-fast", "openai/gpt-oss-120b"]
+MODELS = ["google/gemini-3-pro-preview", "openai/gpt-5.1", "openai/gpt-5.1-codex", "openai/gpt-5.1-codex-mini", "openai/gpt-5-pro", "anthropic/claude-4.5-sonnet", "x-ai/grok-4.1-fast", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
+
+FILE_LIKE_EXTS = {".py",".pyw",".ipynb",".js",".mjs",".cjs",".ts",".tsx",".c",".cc",".cpp",".cxx",".h",".hpp",".hh",".hxx",".go",".rs",".cs",".java",".html",".htm",".css",".md",".markdown",".txt",".rst",".json",".yaml",".yml",".toml",".sql",".sh",".bash",".zsh",".bat",".ps1"}
 
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 20) -> List[str]:
     if not query or len(query) < 2: return []
@@ -49,7 +51,7 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
 
     # Non-wildcard mode: fast substring match on filename with extension whitelist and truncation
     results, q = [], query.lower()
-    WHITELIST_EXTS = {'.py', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h', '.go', '.cs', '.java', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.html', '.rs', '.md', '.sql'}
+    WHITELIST_EXTS = FILE_LIKE_EXTS
     try:
         for item in home.rglob('*'):
             if len(results) >= max_results: break
@@ -72,8 +74,27 @@ def read_files(file_paths: List[str]) -> str:
     for path in file_paths:
         name = Path(path).name
         try:
-            with open(path, 'r', encoding='utf-8') as f:
-                contents.append(f"### {name}\n{f.read()}\n")
+            if name.endswith(".ipynb"):
+                with open(path, 'r', encoding='utf-8') as f:
+                    try:
+                        nb = json.load(f)
+                    except Exception as e:
+                        contents.append(f"### {name}\nError parsing notebook JSON: {e}\n")
+                        continue
+                cells = []
+                for cell in nb.get("cells", []):
+                    if cell.get("cell_type") != "code": continue
+                    src = cell.get("source", [])
+                    if isinstance(src, str): src = [src]
+                    if not isinstance(src, list): continue
+                    src = [s if isinstance(s, str) else str(s) for s in src]
+                    cells.append({"source": src})
+                simplified = {"cells": cells}
+                header = f"### {name}\nExtracted only source from notebook, if making edits do so cell by cell\n"
+                contents.append(header + json.dumps(simplified, indent=2) + "\n")
+            else:
+                with open(path, 'r', encoding='utf-8') as f:
+                    contents.append(f"### {name}\n{f.read()}\n")
         except Exception as e:
             contents.append(f"### {name} \nError: {e}\n")
     return '\n'.join(contents)
