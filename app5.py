@@ -67,61 +67,17 @@ HEAD_CSS = '''
 
 # --- Helpers ---
 
-_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*://')
-_BARE_DOMAIN_RE = re.compile(r'^([\w.-]+)\.([a-zA-Z]{2,})$')
-_WIN_DRIVE_RE = re.compile(r'^[a-zA-Z]:[\\/]|^\\\\')  # C:\foo or \\server\share
-
-
 def looks_like_url(sv: str) -> bool:
-    if not sv:
-        return False
+    if not sv: return False
     u = sv.strip()
-    if not u or ' ' in u:
-        return False
-
-    # 1) Already has a scheme -> rely on urlparse, but only accept http/https
-    if _SCHEME_RE.match(u):
-        try:
-            p = urlparse(u)
-        except Exception:
-            return False
-        return p.scheme in ('http', 'https') and bool(p.netloc)
-
-    # 2) Obvious local/OS path patterns -> not a URL
-    if (
-        u.startswith(('.', '/', '~'))  # ./foo, /etc/hosts, ~/file
-        or '\\' in u                   # any Windows-style separator
-        or _WIN_DRIVE_RE.match(u)      # C:\foo, \\server\share
-    ):
-        return False
-
-    # 3) Bare domain like "example.com"
-    m = _BARE_DOMAIN_RE.match(u)
-    if m:
-        ext = '.' + m.group(2).lower()
-        if ext in FILE_LIKE_EXTS:
-            # Looks like a filename (e.g. app5.py), not a URL
-            return False
-        try:
-            p = urlparse('http://' + u)
-        except Exception:
-            return False
-        return bool(p.netloc)
-
-    # 4) Heuristic: contains URL-ish punctuation -> try as host/path
-    if any(ch in u for ch in '/?#:'):
-        try:
-            p = urlparse('http://' + u)
-        except Exception:
-            return False
-        return bool(p.netloc)
-
-    return False
+    if not u or ' ' in u: return False
+    ul = u.lower()
+    return ul.startswith('http://') or ul.startswith('https://') or ul.startswith('www.')
 
 def normalize_url(u: str) -> str:
-    u = u.strip()
-    if not re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', u):
-        u = 'http://' + u
+    u = (u or '').strip()
+    if not u: return ''
+    if u.lower().startswith('www.'): return 'http://' + u
     return u
 
 async def fetch_url_content(url: str) -> Path:
@@ -216,7 +172,7 @@ async def main_page():
         'session_id': str(uuid.uuid4()), 'stream_buffer': [],
         'stream_done': False, 'stream_error': None, 'render_pos': 0,
         'finalized': False, 'producer_task': None, 'consumer_timer': None,
-        'answer_started': False, 'last_render_time': 0.0,
+        'answer_started': False, 'last_render_time': 0.0, 'last_render_duration': 0.0,
     }
     for k, v in defaults.items():
         s.setdefault(k, v)
@@ -439,6 +395,7 @@ async def main_page():
         s['finalized'] = False
         s['answer_started'] = False
         s['last_render_time'] = 0.0
+        s['last_render_duration'] = 0.0
 
     def ensure_answer_md():
         if not s.get('answer_md'):
@@ -458,17 +415,21 @@ async def main_page():
             chunks, pos = s.get('stream_buffer', []), s.get('render_pos', 0)
             n = len(chunks)
             if pos < n:
-                s['render_pos'] = n
                 text = ''.join(chunks)
+                s['stream_buffer'] = [text]
+                s['render_pos'] = 1
                 md = s.get('answer_md')
                 if md:
                     now = time.monotonic()
                     last = s.get('last_render_time', 0.0)
-                    # Throttle updates; always flush on completion
-                    if (now - last) >= 0.05 or s.get('stream_done'):
+                    dur = s.get('last_render_duration', 0.0) or 0.0
+                    min_gap = 0.02 + 1.5 * dur
+                    if (now - last) >= min_gap or s.get('stream_done'):
                         with contextlib.suppress(Exception):
-                            md.set_content(with_temp_code_fence(text))                        
+                            t0 = time.perf_counter()
+                            md.set_content(with_temp_code_fence(text))
                             s['last_render_time'] = now
+                            s['last_render_duration'] = time.perf_counter() - t0
 
             if s.get('stream_done') and not s.get('finalized'):
                 full = ''.join(s.get('stream_buffer') or [])
