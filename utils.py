@@ -10,7 +10,7 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-5.2"
-MODELS = ["google/gemini-3-pro-preview", "openai/gpt-5.2", "openai/gpt-5.1-codex-mini", "openai/gpt-5.2-pro", "anthropic/claude-4.5-opus", "x-ai/grok-4.1-fast", "openai/gpt-oss-120b"]
+MODELS = ["google/gemini-3-pro-preview", "google/gemini-3-flash-preview", "openai/gpt-5.2", "openai/gpt-5.2-pro", "anthropic/claude-4.5-opus", "x-ai/grok-4.1-fast", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 FILE_LIKE_EXTS = {".py",".pyw",".ipynb",".js",".mjs",".cjs",".ts",".tsx",".c",".cc",".cpp",".cxx",".h",".hpp",".hh",".hxx",".go",".rs",".cs",".java",".html",".htm",".css",".md",".markdown",".txt",".rst",".json",".yaml",".yml",".toml",".sql",".sh",".bash",".zsh",".bat",".ps1"}
