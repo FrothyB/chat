@@ -20,7 +20,6 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
     default_base = Path(__file__).resolve().parent.parent
     home = Path(base_path) if base_path else default_base
 
-    # Wildcard mode: '*' or '?' present -> match against full relative paths, with '*' spanning directories
     if any(ch in query for ch in ('*','?')):
         pat = os.path.expanduser(query.strip())
 
@@ -49,7 +48,6 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
             pass
         return sorted(set(results))
 
-    # Non-wildcard mode: fast substring match on filename with extension whitelist and truncation
     results, q = [], query.lower()
     WHITELIST_EXTS = FILE_LIKE_EXTS
     try:
@@ -102,11 +100,11 @@ def read_files(file_paths: List[str]) -> str:
 @dataclass
 class EditFile:
     path: str
-    original_content: Optional[str]  # None for newly created files
+    original_content: Optional[str]
 
 @dataclass
 class EditEvent:
-    kind: str                 # 'complete' | 'error'
+    kind: str
     filename: str
     details: str = ''
     path: Optional[str] = None
@@ -123,22 +121,26 @@ class ReplaceBlock:
 
 @dataclass
 class EditDirective:
-    kind: str                 # 'REWRITE' | 'EDIT'
+    kind: str
     filename: str
     explanation: str = ''
     rewrite: Optional[str] = None
     replaces: List[ReplaceBlock] = field(default_factory=list)
 
 class ChatClient:
+    _EDIT_TRIGGER_RE = re.compile(r'\b(?:edit|fix|modify|rewrite|adjust|change)\b')
+
     def __init__(self):
-        self.messages = [{"role": "system", "content": CHAT_PROMPT}]
+        self.messages = [{"role": "system", "content": ""}]
+        self._chat_prompt_injected = False
+        self._edit_prompt_injected = False
         self.files: List[str] = []
         self.message_files: Dict[int, List[str]] = {}
         self.edited_files: Dict[str, bool] = {}
         self.edit_transactions: List[Dict] = []
         self.client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=7200, max_retries=20) # http_client = httpx.AsyncClient(timeout=7200))
         # self.openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-    
+
     def get_completion(self, data):
         # if 'openai' in data["model"] and self.openai_client:
         #     data["model"] = data["model"].replace('openai/', '')
@@ -148,19 +150,45 @@ class ChatClient:
         #     return self.openai_client.chat.completions.create(**data)
         return self.client.chat.completions.create(**data)
 
+    def _strip_injected_prompts(self, s: str) -> str:
+        s = s or ''
+        if s.startswith(CHAT_PROMPT): s = s[len(CHAT_PROMPT):]
+        if s.startswith(EDIT_PROMPT): s = s[len(EDIT_PROMPT):]
+        return s.lstrip('\n')
+
+    def _recompute_prompt_flags(self) -> None:
+        chat, edit = False, False
+        for m in self.messages:
+            if m.get('role') != 'user': continue
+            c = m.get('content') or ''
+            if c.startswith(CHAT_PROMPT): chat = True
+            if c.startswith(EDIT_PROMPT) or c.startswith(CHAT_PROMPT + EDIT_PROMPT): edit = True
+            if chat and edit: break
+        self._chat_prompt_injected, self._edit_prompt_injected = chat, edit
+
     async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = "minimal"
                             ) -> AsyncGenerator[Union[str, ReasoningEvent], None]:
         msg_index = len(self.messages)
         if self.files: self.message_files[msg_index] = self.files.copy()
+
+        prefix = ''
+        if not self._chat_prompt_injected:
+            prefix += CHAT_PROMPT
+            self._chat_prompt_injected = True
+
+        trigger_edit = bool(self._EDIT_TRIGGER_RE.search((user_msg or '').lower()))
+        if trigger_edit and not self._edit_prompt_injected:
+            prefix += EDIT_PROMPT
+            self._edit_prompt_injected = True
+
+        if prefix: user_msg = f"{prefix}\n\n{user_msg}"
+
         content = user_msg + (f"\n\nAttached files:\n{read_files(self.files)}" if self.files else "")
         self.messages.append({"role": "user", "content": content})
         self.files = []
         assistant_index = len(self.messages)
         self.messages.append({"role": "assistant", "content": ""})
         data = {"model": model, "messages": self.messages[:-1], "max_tokens": 50000, "temperature": 0.2, "stream": True, "reasoning_effort": reasoning}
-        # if reasoning != "none":
-        #     key = "effort" if ('openai' in model or 'x-ai' in model) else "max_tokens"
-        #     data["reasoning"] = {"enabled": True, key: reasoning if key == "effort" else REASONING_LEVELS[reasoning]}
         full_response, full_reasoning = "", ""
         try:
             stream = await self.get_completion(data)
@@ -179,7 +207,8 @@ class ChatClient:
                     if reason:
                         full_reasoning += reason
                         yield ReasoningEvent(text=reason)
-                except Exception: continue
+                except Exception:
+                    continue
             self.messages[assistant_index]["content"] = full_response
         except (asyncio.CancelledError, GeneratorExit):
             raise
@@ -237,9 +266,11 @@ class ChatClient:
         if self.message_files:
             ctx_files = self.message_files.get(max(self.message_files.keys()), [])
         ctx_paths = [Path(p) for p in ctx_files]
+
         def suffix_matches(p: Path, suffix: Path) -> bool:
             sp, pp = suffix.parts, p.parts
             return len(pp) >= len(sp) and tuple(pp[-len(sp):]) == sp
+
         if ctx_paths:
             if len(cand.parts) > 1:
                 matches = [p for p in ctx_paths if suffix_matches(p, cand)]
@@ -248,6 +279,7 @@ class ChatClient:
             base_matches = [p for p in ctx_paths if p.name == cand.name]
             if len(base_matches) == 1: return str(base_matches[0])
             if len(base_matches) > 1: return None
+
         for base in ['/home/pygmy/code', '.']:
             p = Path(base) / name
             if p.exists(): return str(p)
@@ -265,10 +297,6 @@ class ChatClient:
             with contextlib.suppress(Exception): os.fsync(tmp.fileno())
             tmp_name = tmp.name
         os.replace(tmp_name, str(path))
-
-    def _remember_original(self, path: str, original: Optional[str]):
-        if path not in self.edited_files:
-            self.edited_files[path] = EditFile(path=path, original_content=original)
 
     @staticmethod
     def _norm_newlines(s: str) -> str:
@@ -299,8 +327,10 @@ class ChatClient:
                     name, p = Path(target).name, Path(target)
                     original = None
                     if p.exists():
-                        try: original = p.read_text(encoding='utf-8')
-                        except Exception as e: results.append(EditEvent('error', name, f'Read error: {e}', target)); continue
+                        try:
+                            original = p.read_text(encoding='utf-8')
+                        except Exception as e:
+                            results.append(EditEvent('error', name, f'Read error: {e}', target)); continue
                     try:
                         _remember_prev(target)
                         self._atomic_write(p, d.rewrite or '')
@@ -316,8 +346,10 @@ class ChatClient:
                 if not target:
                     results.append(EditEvent('error', Path(d.filename).name, 'File not found', d.filename)); continue
                 name, p = Path(target).name, Path(target)
-                try: original = p.read_text(encoding='utf-8')
-                except Exception as e: results.append(EditEvent('error', name, f'Read error: {e}', target)); continue
+                try:
+                    original = p.read_text(encoding='utf-8')
+                except Exception as e:
+                    results.append(EditEvent('error', name, f'Read error: {e}', target)); continue
 
                 if not d.replaces:
                     results.append(EditEvent('error', name, 'No REPLACE blocks found', target)); continue
@@ -434,12 +466,23 @@ class ChatClient:
                 user_msg = content.split('\n\nAttached files:')[0] if '\n\nAttached files:' in content else content
                 for addon in (EXTRACT_ADD_ON,):
                     if addon in user_msg:
-                        user_msg = user_msg.split(addon, 1)[0].rstrip(); break
+                        user_msg = user_msg.split(addon, 1)[0].rstrip()
+                        break
+                user_msg = self._strip_injected_prompts(user_msg)
+                self._recompute_prompt_flags()
                 return user_msg, files
+        self._recompute_prompt_flags()
         return None, []
 
     def get_display_messages(self) -> List[Tuple[str, str]]:
-        return [(m['role'], m['content'].split('\n\nAttached files:')[0] if m['role'] == 'user' else m['content']) for m in self.messages[1:]]
+        out = []
+        for m in self.messages[1:]:
+            role, content = m.get('role'), m.get('content') or ''
+            if role == 'user':
+                content = content.split('\n\nAttached files:')[0] if '\n\nAttached files:' in content else content
+                content = self._strip_injected_prompts(content)
+            out.append((role, content))
+        return out
 
     def ensure_last_assistant_nonempty(self, fallback: str = 'Response stopped.'):
         try:
