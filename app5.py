@@ -12,7 +12,7 @@ import httpx
 from nicegui import app, ui
 
 from utils import (
-    ChatClient, search_files, STYLE_CSS, MODELS, REASONING_LEVELS,
+    DEFAULT_REASONING, ChatClient, search_files, STYLE_CSS, MODELS, REASONING_LEVELS,
     DEFAULT_MODEL, EXTRACT_ADD_ON, ReasoningEvent, FILE_LIKE_EXTS
 )
 
@@ -164,7 +164,7 @@ async def main_page():
     # Persistent state defaults
     defaults = {
         'chat': ChatClient(), 'draft': '', 'model': DEFAULT_MODEL,
-        'reasoning': 'low', 'mode': 'chat', 'streaming': False,
+        'reasoning': DEFAULT_REASONING, 'mode': 'chat', 'streaming': False,
         'answer_counter': 0, 'msg_counter': 0, 'file_results': [],
         'file_idx': -1, 'edit_history': [], 'pending_edits_text': None,
         'apply_all_bubble': None, 'last_edit_round_status': None,
