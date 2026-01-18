@@ -129,7 +129,7 @@ class EditDirective:
     replaces: List[ReplaceBlock] = field(default_factory=list)
 
 class ChatClient:
-    _EDIT_TRIGGER_RE = re.compile(r'\b(?:edit|fix|modify|rewrite|adjust|change)\b')
+    _EDIT_TRIGGER_RE = re.compile(r'\b(?:edit|rewrite)\b')
 
     def __init__(self):
         self.messages = [{"role": "system", "content": ""}]
