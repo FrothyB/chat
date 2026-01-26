@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 from nicegui import app, ui
 
-from utils import (
+from chat_utils import (
     DEFAULT_REASONING, ChatClient, search_files, STYLE_CSS, MODELS, REASONING_LEVELS,
     DEFAULT_MODEL, EXTRACT_ADD_ON, ReasoningEvent, FILE_LIKE_EXTS
 )
@@ -299,10 +299,14 @@ async def main_page():
         with contextlib.suppress(Exception):
             s['chat'].ensure_last_assistant_nonempty(full_text)
 
+        rendered = s['chat'].render_for_display(full_text)
+        with contextlib.suppress(Exception):
+            s['chat'].set_last_assistant_display(rendered)
+
         md = s.get('answer_md')
         if md:
             with contextlib.suppress(Exception):
-                md.set_content(full_text)
+                md.set_content(rendered)
                 scan_code_copy_buttons(s.get('answer_id', ''))
 
         s['streaming'] = False
@@ -427,7 +431,7 @@ async def main_page():
                     if (now - last) >= min_gap or s.get('stream_done'):
                         with contextlib.suppress(Exception):
                             t0 = time.perf_counter()
-                            md.set_content(with_temp_code_fence(text))
+                            md.set_content(with_temp_code_fence(s['chat'].render_for_display(text)))
                             s['last_render_time'] = now
                             s['last_render_duration'] = time.perf_counter() - t0
 
