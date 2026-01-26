@@ -45,7 +45,8 @@ Rules:
 The X-Y indicate line numbers you wish to replace;
 Use the appropriate language for syntax highlighting in fences;
 Be surgical with your replacements;
-However, when changes are major it may be cleaner to replace/rewrite the majority of or the entire file;
+However, when changes are major it may be cleaner to replace/rewrite the majority of or the entire file in one large block;
+Do the above if instructed to rewrite;
 A WITH can be empty;
 Remove code that will become dead after your edits;
 Don't add comments to replace removed code, just delete it entirely;

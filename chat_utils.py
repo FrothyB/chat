@@ -135,7 +135,7 @@ class EditDirective:
     replaces: List[ReplaceBlock] = field(default_factory=list)
 
 class ChatClient:
-    _EDIT_TRIGGER_RE = re.compile(r'\bedit\b')
+    _EDIT_TRIGGER_RE = re.compile(r'\b(?:edit|rewrite)\b')
 
     _SEC_HDR_RE = re.compile(r'(?im)^###\s*(EDIT)\s+(.+?)\s*$')
     _CODE_FENCE_RE = re.compile(r'```[ \t]*([^\n]*)\n(.*?)```', re.DOTALL)
