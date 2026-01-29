@@ -47,6 +47,7 @@ Use the appropriate language for syntax highlighting in fences;
 Be surgical with your replacements;
 However, when changes are major it may be cleaner to replace/rewrite the majority of or the entire file in one large block;
 Do the above if instructed to rewrite;
+Rewrites can be done exclusively with EDIT/REPLACE/WITH commands;
 A WITH can be empty;
 Remove code that will become dead after your edits;
 Don't add comments to replace removed code, just delete it entirely;

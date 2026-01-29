@@ -1,70 +1,48 @@
 # AI Chat
 
-A fast, developer-focused AI chat app with file context, web page scraping, and one-click AI-driven edits.
+An exceptionally fast, developer-centric AI interface featuring deep file integration, web scraping, and surgical AI-driven code modifications.
 
-## Run it
+## Quick Start
 
-1) Requirements
-- Python 3.10+
-- Env var: OPENROUTER_API_KEY (or OPENAI_API_KEY for direct OpenAI)
+1.  **Requirements**: Python 3.10+, `OPENROUTER_API_KEY` environment variable.
+2.  **Install**: `pip install -U nicegui httpx openai beautifulsoup4 playwright`
+3.  **Setup Playwright** (for JS-heavy sites): `playwright install chromium`
+4.  **Launch**: `python app5.py --port 8080`
 
-2) Install
-`pip install -U nicegui httpx openai beautifulsoup4`
+## Core Capabilities
 
+-   **Advanced Streaming**: High-performance UI with adaptive rendering and real-time response timers.
+-   **Context Injection**: Attach local files or scrape web URLs directly into the conversation.
+-   **Surgical Edits**: Apply AI-suggested changes using a robust `REPLACE X-Y` line-range system.
+-   **Safety First**: Atomic file writes with one-click "Reject" (rollback) and "Undo" (revert edits + message).
+-   **Reasoning Control**: Toggle model reasoning effort (none to high) for complex problem solving.
+-   **Persistence**: Per-tab state management ensures your context survives refreshes or disconnects.
 
-3) Start
-`python app5.py --port 8080`
+## Workflow
 
-- Open http://localhost:8080 (or https if <!--CODE_BLOCK_1039-->/<!--CODE_BLOCK_1040--> exist)
-- Dark mode on by default
+### Context Management
+-   **Search**: Type 2+ chars in the search bar to find local files. Use arrows to navigate, Enter to attach.
+-   **Globs**: Use `*` or `?` (e.g., `src/**/*.py`) and press Enter to batch-attach matching files.
+-   **Web**: Paste a URL to scrape its content into Markdown. Uses Playwright for 403-bypass if needed.
+-   **Line Numbers**: Files are automatically attached with line numbers to facilitate precise editing.
 
-## What it can do
+### AI-Driven Editing
+The system uses a specific protocol for modifications:
+1.  Ask the AI to "edit" or "rewrite" a file.
+2.  The AI responds with `### EDIT <path>` and `#### REPLACE X-Y` blocks.
+3.  **Preview**: The app dynamically renders the "original" code inside the AI's response for immediate verification.
+4.  **Apply**: Click "Apply edits" to execute changes.
+5.  **Revert**: Use "Reject" on a specific file bubble or "Back" to undo the entire transaction.
 
-- Chat with top models via OpenRouter (OpenAI optional)
-- Streamed responses with a timer
-- Attach local files to give the AI context
-- Paste URLs to scrape pages into Markdown and attach automatically
-- Apply AI-suggested file edits (EDIT/REWRITE) safely with rollback
-- Copy code blocks, Stop/Undo/Clear, and an “extract” mode for structured output
-- Per-tab chat state persistence (state maintained on refresh/disconnect)
-
-## How to use
-
-- Typing and sending
-  - Enter sends
-  - Shift+Enter inserts a newline
-- Models and reasoning
-  - Pick a model and a reasoning level (none → high) in the header
-- Add files
-  - Use the “Search files or paste URL...” box
-  - Type at least 2 chars to search; arrows to navigate; Enter to attach
-  - Use glob patterns with `*` (matches any characters, including across directories) or `?` (matches single character), e.g., `*.py` for all Python files or `src/**/*.md` for Markdown files in `src` recursively; press Enter to attach all matches
-  - Attached files are shown as green chips; click × to remove
-- Add web pages
-  - Paste a URL in the same box and press Enter
-  - The page is scraped to Markdown and attached automatically
-  - Cached at: ~/.cache/ai-chat/web
-- Apply edits
-  - Ask the AI to modify files; it will reply with EDIT/REWRITE blocks
-  - Click “Apply edits” to apply all changes atomically (with backup)
-  - Success/error bubbles show line counts; “Reject” reverts a file
-- Controls
-  - Stop: halt streaming
-  - Back: undo last user message and revert its edits
-  - Clear: reset chat and attachments
-  - Copy: use the copy icon on any code block
-- Modes
-  - chat: normal conversation
-  - extract: app auto-appends a helper prompt for structured output
+### Interface Controls
+-   **Mode (chat/extract)**: `extract` appends a prompt for structured data output.
+-   **Stop**: Immediately halts an active stream and finalizes the buffer.
+-   **Back**: Reverts the last exchange and any associated file modifications.
+-   **Clear**: Resets the entire session state.
+-   **Copy**: Integrated copy buttons on all code blocks (requires HTTPS/localhost for clipboard API).
 
 ## Configuration
 
-- Environment
-  - OPENROUTER_API_KEY for OpenRouter (recommended)
-  - OPENAI_API_KEY for direct OpenAI (optional)
-- SSL (optional)
-  - Place cert.pem and key.pem in the project root to enable HTTPS (may be necessary for copy+paste)
-
-## Notes
-
-- Paths are resolved relative to directory above that which the app is run from
+-   **SSL**: Place `cert.pem` and `key.pem` in the root to enable HTTPS (recommended for clipboard support).
+-   **Headless**: Set `AI_CHAT_PLAYWRIGHT_HEADLESS=1` to hide the browser during scraping.
+-   **Cache**: Web content is cached at `~/.cache/ai-chat/web`.

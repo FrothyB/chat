@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import os
 import time
 import argparse
 import re
@@ -7,7 +8,6 @@ import hashlib
 import uuid
 from urllib.parse import urlparse
 from pathlib import Path
-
 import httpx
 from nicegui import app, ui
 
@@ -87,7 +87,7 @@ async def fetch_url_content(url: str) -> Path:
         raise RuntimeError('Missing dependency: beautifulsoup4')
 
     u = normalize_url(url)
-    
+
     def make_headers(target: str):
         try:
             p = urlparse(target)
@@ -97,29 +97,61 @@ async def fetch_url_content(url: str) -> Path:
         h = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
             'Accept-Language': 'en-US,en;q=0.9',
             'Cache-Control': 'no-cache', 'Pragma': 'no-cache', 'Upgrade-Insecure-Requests': '1',
         }
         if ref: h['Referer'] = ref
         return h
 
-    async with httpx.AsyncClient(http2=True, follow_redirects=True, timeout=30) as client:
-        headers = make_headers(u)
-        resp = await client.get(u, headers=headers)
-        if resp.status_code == 403:
-            headers['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15'
-            resp = await client.get(u, headers=headers)
-        resp.raise_for_status()
-        ctype = (resp.headers.get('content-type') or '').lower()
-        if not any(x in ctype for x in ('text/html', 'xml', 'text/plain')):
-            raise ValueError('URL is not HTML/text')
-        html = resp.text or ''
+    async def httpx_get_html(target: str) -> tuple[int, str, str]:
+        async with httpx.AsyncClient(http2=True, follow_redirects=True, timeout=30) as client:
+            headers = make_headers(target)
+            resp = await client.get(target, headers=headers)
+            if resp.status_code == 403:
+                headers['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15'
+                resp = await client.get(target, headers=headers)
+            return resp.status_code, (resp.headers.get('content-type') or ''), (resp.text or '')
+
+    async def playwright_get_html(target: str, profile_dir: Path) -> str:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError("403 from target; install Playwright: `pip install playwright` then `playwright install chromium`")
+
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        headless = os.getenv('AI_CHAT_PLAYWRIGHT_HEADLESS', '').strip() in {'1', 'true', 'yes'}
+        async with async_playwright() as p:
+            ctx = await p.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=headless,  # set AI_CHAT_PLAYWRIGHT_HEADLESS=1 to force headless
+                args=['--disable-blink-features=AutomationControlled'],
+            )
+            try:
+                page = await ctx.new_page()
+                await page.goto(target, wait_until='networkidle', timeout=60_000)
+                return await page.content()
+            finally:
+                with contextlib.suppress(Exception):
+                    await ctx.close()
+
+    status, ctype, html = await httpx_get_html(u)
+    if status == 403:
+        cache_root = Path.home() / '.cache' / 'ai-chat' / 'web'
+        html = await playwright_get_html(u, cache_root / 'pw-profile')
+        ctype = 'text/html'
+        status = 200
+
+    if status >= 400:
+        raise httpx.HTTPStatusError(f'{status} {u}', request=None, response=None)
+
+    ctype = (ctype or '').lower()
+    if not any(x in ctype for x in ('text/html', 'xml', 'text/plain')):
+        raise ValueError('URL is not HTML/text')
 
     soup = BeautifulSoup(html, 'html.parser')
     for t in soup(['script', 'style', 'noscript', 'iframe', 'svg', 'picture', 'source', 'canvas', 'meta', 'link']):
         t.decompose()
-    
+
     title = (soup.title.string or '').strip() if soup.title and soup.title.string else ''
     blocks = []
     for el in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'pre', 'blockquote']):
@@ -130,15 +162,15 @@ async def fetch_url_content(url: str) -> Path:
         elif el.name == 'li':
             txt = '- ' + txt
         blocks.append(txt)
-    
+
     text = '\n\n'.join(blocks) or soup.get_text('\n', strip=True)
-    
+
     parsed = urlparse(u)
     host = parsed.netloc.replace(':', '_')
     slug = re.sub(r'[^a-zA-Z0-9]+', '-', (title or parsed.path.strip('/') or 'page')).strip('-').lower()
     h = hashlib.sha1(u.encode('utf-8')).hexdigest()[:8]
     name = f'{host}__{slug or "page"}__{h}.md'
-    
+
     cache_dir = Path.home() / '.cache' / 'ai-chat' / 'web'
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / name
