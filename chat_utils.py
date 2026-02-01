@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1"
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_MODEL = "openai/gpt-5.2"
 DEFAULT_REASONING = "medium"
@@ -19,17 +20,24 @@ FILE_LIKE_EXTS = {".py",".pyw",".ipynb",".js",".mjs",".cjs",".ts",".tsx",".c",".
 # Every N lines, prefix that line with "<line_no>" when attaching file contents.
 LINE_NUMBER_EVERY = 1
 
-
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 20) -> List[str]:
     if not query or len(query) < 2: return []
-    default_base = Path(__file__).resolve().parent.parent
-    home = Path(base_path) if base_path else default_base
+    base = (Path(base_path).resolve() if base_path else BASE_DIR)
 
-    if any(ch in query for ch in ('*','?')):
-        pat = os.path.expanduser(query.strip())
+    def rel_of(p: Path) -> Optional[str]:
+        try: return p.relative_to(base).as_posix()
+        except Exception: return None
+
+    q = (query or '').strip().replace('\\', '/')
+    if not q: return []
+
+    if any(ch in q for ch in ('*', '?')):
+        pat = os.path.expanduser(q) if q.startswith('~') else q
+        if pat.startswith('/'):
+            try: pat = Path(pat).resolve().relative_to(base).as_posix()
+            except Exception: return []
 
         def to_regex(p: str) -> re.Pattern:
-            p = p.replace('\\', '/')
             buf = []
             for ch in p:
                 if ch == '*': buf.append('.*')
@@ -37,38 +45,25 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
                 else: buf.append(re.escape(ch))
             return re.compile('^' + ''.join(buf) + '$', re.IGNORECASE)
 
-        rx = to_regex(pat)
-        results: List[str] = []
-        try:
-            for item in home.rglob('*'):
-                try:
-                    if not item.is_file(): continue
-                    rel = item.relative_to(home).as_posix()
-                    absp = item.resolve().as_posix()
-                    if rx.match(rel) or rx.match(absp):
-                        results.append(str(item))
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        rx, results = to_regex(pat), []
+        with contextlib.suppress(Exception):
+            for item in base.rglob('*'):
+                if not item.is_file(): continue
+                rel = rel_of(item)
+                if rel and rx.match(rel): results.append(rel)
         return sorted(set(results))
 
-    results, q = [], query.lower()
-    try:
-        for item in home.rglob('*'):
+    results, ql = [], q.lower()
+    with contextlib.suppress(Exception):
+        for item in base.rglob('*'):
             if len(results) >= max_results: break
-            try:
-                if not item.is_file(): continue
-                if any(p.startswith('.') for p in item.parts): continue
-                if q not in item.name.lower(): continue
-                if item.suffix.lower() not in FILE_LIKE_EXTS: continue
-                results.append(str(item))
-            except Exception:
-                continue
-    except Exception:
-        pass
+            if not item.is_file(): continue
+            rel = rel_of(item)
+            if not rel or any(p.startswith('.') for p in Path(rel).parts): continue
+            if ql not in item.name.lower(): continue
+            if item.suffix.lower() not in FILE_LIKE_EXTS: continue
+            results.append(rel)
     return sorted(set(results))[:max_results]
-
 
 def _with_line_tokens(text: str, every: int = LINE_NUMBER_EVERY) -> str:
     if not text or every <= 0: return text or ''
@@ -77,13 +72,20 @@ def _with_line_tokens(text: str, every: int = LINE_NUMBER_EVERY) -> str:
         ls[i] = f"{i + 1}{ls[i]}"
     return ''.join(ls)
 
-
 def read_files(file_paths: List[str]) -> str:
     if not file_paths: return ""
     out: List[str] = []
-    for path in file_paths:
-        p = Path(path)
-        name = p.as_posix()
+
+    for rel in file_paths:
+        r = Path((rel or '').strip().replace('\\', '/'))
+        name = r.as_posix()
+        if not name or r.is_absolute():
+            out.append(f"### {name or rel}\nError: invalid relative path\n"); continue
+
+        p = (BASE_DIR / r).resolve()
+        if not p.is_relative_to(BASE_DIR):
+            out.append(f"### {name}\nError: path escapes base dir\n"); continue
+
         try:
             if p.name.endswith(".ipynb"):
                 raw = p.read_text(encoding='utf-8')
@@ -102,8 +104,8 @@ def read_files(file_paths: List[str]) -> str:
                 out.append(f"### {name}\n{_with_line_tokens(p.read_text(encoding='utf-8'))}\n")
         except Exception as e:
             out.append(f"### {name}\nError: {e}\n")
-    return '\n'.join(out)
 
+    return '\n'.join(out)
 
 @dataclass
 class EditEvent:
@@ -235,18 +237,23 @@ class ChatClient:
 
     # --- Display-only expansion for "####REPLACE a-b" ---
 
-    def _get_file_lines_cached(self, path: str) -> Optional[List[str]]:
+    def _get_file_lines_cached(self, rel: str) -> Optional[List[str]]:
         try:
-            p = Path(path)
+            rp = Path((rel or '').strip().replace('\\', '/'))
+            if not rel or rp.is_absolute(): return None
+            p = (BASE_DIR / rp).resolve()
+            if not p.is_relative_to(BASE_DIR) or not p.exists(): return None
+
             st = p.stat()
             mtime_ns = getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9))
-            cached = self._file_cache.get(path)
+            cached = self._file_cache.get(rel)
             if cached and cached[0] == mtime_ns and cached[1] == st.st_size:
                 return cached[2]
+
             norm = self._norm_newlines(p.read_text(encoding='utf-8'))
             lines = norm.split('\n')
             if norm.endswith('\n'): lines = lines[:-1]
-            self._file_cache[path] = (mtime_ns, st.st_size, lines)
+            self._file_cache[rel] = (mtime_ns, st.st_size, lines)
             return lines
         except Exception:
             return None
@@ -333,9 +340,22 @@ class ChatClient:
         return out
 
     def _resolve_path(self, filename: str, create_if_missing: bool = False) -> Optional[str]:
-        name = (filename or '').strip()
-        cand = Path(name)
-        if cand.exists(): return str(cand)
+        raw = (filename or '').strip().replace('`', '').replace('\\', '/')
+        if not raw: return None
+        cand = Path(raw)
+        if cand.is_absolute(): return None
+
+        def safe_rel(p: Path) -> Optional[Path]:
+            try:
+                rp = p.relative_to(BASE_DIR)
+                return Path(rp.as_posix())
+            except Exception:
+                return None
+
+        abs0 = (BASE_DIR / cand).resolve()
+        rel0 = safe_rel(abs0)
+        if not rel0: return None
+        if abs0.exists() or create_if_missing: return rel0.as_posix()
 
         ctx_files = self.message_files.get(max(self.message_files.keys()), []) if self.message_files else []
         ctx_paths = [Path(p) for p in ctx_files]
@@ -347,21 +367,24 @@ class ChatClient:
         if ctx_paths:
             if len(cand.parts) > 1:
                 hits = [p for p in ctx_paths if suffix_matches(p, cand)]
-                if len(hits) == 1: return str(hits[0])
+                if len(hits) == 1: return hits[0].as_posix()
                 if len(hits) > 1: return None
             hits = [p for p in ctx_paths if p.name == cand.name]
-            if len(hits) == 1: return str(hits[0])
+            if len(hits) == 1: return hits[0].as_posix()
             if len(hits) > 1: return None
 
-        for base in ['/home/pygmy/code', '.']:
-            p = Path(base) / name
-            if p.exists(): return str(p)
-            if len(cand.parts) > 1:
-                with contextlib.suppress(Exception):
-                    hits = [q for q in Path(base).rglob(cand.name) if q.is_file() and suffix_matches(q, cand)]
-                    if len(hits) == 1: return str(hits[0])
-                    if len(hits) > 1: return None
-        return str(cand) if create_if_missing else None
+        hits: List[Path] = []
+        with contextlib.suppress(Exception):
+            for q in BASE_DIR.rglob(cand.name):
+                if not q.is_file(): continue
+                rel = q.relative_to(BASE_DIR)
+                if len(cand.parts) > 1 and not suffix_matches(rel, cand): continue
+                hits.append(Path(rel.as_posix()))
+                if len(hits) > 1: break
+        if len(hits) == 1: return hits[0].as_posix()
+        if len(hits) > 1: return None
+
+        return rel0.as_posix() if create_if_missing else None
 
     def _atomic_write(self, path: Path, content: str):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -378,21 +401,45 @@ class ChatClient:
         ai = (len(self.messages) - 1) if (self.messages and self.messages[-1]['role'] == 'assistant') else None
         tx = {'assistant_index': ai, 'files': {}, 'changed': set()}
 
-        def _remember_prev(path: str):
-            if path in tx['files']: return
-            p = Path(path)
-            tx['files'][path] = p.read_text(encoding='utf-8') if p.exists() else None
+        def _abs(rel: str) -> Path:
+            return (BASE_DIR / Path(rel)).resolve()
+
+        def _remember_prev(rel: str):
+            if rel in tx['files']: return
+            p = _abs(rel)
+            tx['files'][rel] = p.read_text(encoding='utf-8') if p.exists() else None
+
+        def _count_lines(s: str) -> int:
+            norm = self._norm_newlines(s or '')
+            ls = norm.split('\n')
+            if norm.endswith('\n'): ls = ls[:-1]
+            return len(ls)
 
         for d in directives:
             try:
-                target = self._resolve_path(d.filename, create_if_missing=False)
+                target = self._resolve_path(d.filename, create_if_missing=True)
                 if not target:
-                    results.append(EditEvent('error', Path(d.filename).name, 'File not found', d.filename)); continue
-                p = Path(target)
-                original = p.read_text(encoding='utf-8')
+                    results.append(EditEvent('error', Path(d.filename).name, 'Invalid path (must be relative to base dir)', d.filename)); continue
+
+                rel, p = target, _abs(target)
+                if not p.is_relative_to(BASE_DIR):
+                    results.append(EditEvent('error', Path(rel).name, 'Path escapes base dir', rel)); continue
+
+                is_new = not p.exists()
+                original = p.read_text(encoding='utf-8') if not is_new else ''
 
                 if not d.replaces:
-                    results.append(EditEvent('error', p.name, 'No REPLACE ranges found', target)); continue
+                    results.append(EditEvent('error', Path(rel).name, 'No REPLACE ranges found', rel)); continue
+
+                if is_new:
+                    parts = [self._norm_newlines(b.new).rstrip('\n') for b in d.replaces]
+                    norm2 = '\n'.join(parts)
+                    updated = norm2 + ('\n' if norm2 else '')
+                    _remember_prev(rel)
+                    self._atomic_write(p, updated)
+                    tx['changed'].add(rel)
+                    results.append(EditEvent('complete', Path(rel).name, f"created: 0 → {_count_lines(updated)} lines", rel))
+                    continue
 
                 eol = '\r\n' if '\r\n' in original else '\n'
                 norm = self._norm_newlines(original)
@@ -403,6 +450,7 @@ class ChatClient:
                 n0 = len(lines)
                 missing: List[str] = []
                 replaced = 0
+
                 for blk in sorted(d.replaces, key=lambda b: (b.start, b.end), reverse=True):
                     a, b = int(blk.start), int(blk.end)
                     if not (1 <= a <= b <= len(lines)):
@@ -414,19 +462,17 @@ class ChatClient:
                     replaced += 1
 
                 if missing:
-                    results.append(EditEvent('error', p.name, f"REPLACE range(s) invalid: {', '.join(missing)}", target)); continue
+                    results.append(EditEvent('error', Path(rel).name, f"REPLACE range(s) invalid: {', '.join(missing)}", rel)); continue
 
                 norm2 = '\n'.join(lines) + ('\n' if had_final_nl else '')
                 updated = norm2 if eol == '\n' else norm2.replace('\n', '\r\n')
                 if updated == original:
-                    results.append(EditEvent('error', p.name, 'No changes applied', target)); continue
+                    results.append(EditEvent('error', Path(rel).name, 'No changes applied', rel)); continue
 
-                _remember_prev(target)
+                _remember_prev(rel)
                 self._atomic_write(p, updated)
-                tx['changed'].add(target)
-
-                n1 = len(self._norm_newlines(updated).split('\n'))
-                results.append(EditEvent('complete', p.name, f"replaced {replaced} range(s): {n0} → {n1} lines", target))
+                tx['changed'].add(rel)
+                results.append(EditEvent('complete', Path(rel).name, f"replaced {replaced} range(s): {n0} → {_count_lines(updated)} lines", rel))
             except Exception as e:
                 results.append(EditEvent('error', Path(d.filename).name, f'Error: {e}', d.filename))
 
@@ -437,12 +483,16 @@ class ChatClient:
         return results
 
     def rollback_file(self, file_path: str) -> bool:
+        rel = (file_path or '').strip().replace('\\', '/')
+        if not rel or Path(rel).is_absolute(): return False
+        p = (BASE_DIR / Path(rel)).resolve()
+        if not p.is_relative_to(BASE_DIR): return False
+
         for i in range(len(self.edit_transactions) - 1, -1, -1):
             tx = self.edit_transactions[i]
             changed: Set[str] = tx.get('changed', set())
-            if file_path not in changed: continue
-            prev = tx['files'].get(file_path, None)
-            p = Path(file_path)
+            if rel not in changed: continue
+            prev = tx['files'].get(rel, None)
             try:
                 if prev is None:
                     with contextlib.suppress(FileNotFoundError): p.unlink()
@@ -450,28 +500,33 @@ class ChatClient:
                     p.write_text(prev, encoding='utf-8')
             except Exception:
                 return False
-            changed.remove(file_path)
-            tx['files'].pop(file_path, None)
+
+            changed.remove(rel)
+            tx['files'].pop(rel, None)
             if not changed:
                 self.edit_transactions.pop(i)
+
             current = {}
             for t in self.edit_transactions:
                 for path in t.get('changed', set()): current[path] = True
             self.edited_files = current
             return True
+
         return False
 
     def rollback_edits_for_assistant(self, assistant_index: int):
         while self.edit_transactions and self.edit_transactions[-1].get('assistant_index') == assistant_index:
             tx = self.edit_transactions.pop()
-            for path in list(tx.get('changed', set())):
-                prev = tx['files'].get(path, None)
-                p = Path(path)
+            for rel in list(tx.get('changed', set())):
+                prev = tx['files'].get(rel, None)
+                p = (BASE_DIR / Path(rel)).resolve()
+                if not p.is_relative_to(BASE_DIR): continue
                 with contextlib.suppress(Exception):
                     if prev is None:
                         with contextlib.suppress(FileNotFoundError): p.unlink()
                     else:
                         p.write_text(prev, encoding='utf-8')
+
         current = {}
         for t in self.edit_transactions:
             for path in t.get('changed', set()): current[path] = True
@@ -512,7 +567,7 @@ class ChatClient:
             out.append((role, content))
         return out
 
-    def ensure_last_assistant_nonempty(self, fallback: str = 'Response stopped.'):
+    def ensure_last_assistant_nonempty(self, fallback: str = "Response stopped."):
         with contextlib.suppress(Exception):
-            if self.messages and self.messages[-1]['role'] == 'assistant' and not (self.messages[-1].get('content') or '').strip():
-                self.messages[-1]['content'] = fallback
+            if self.messages and self.messages[-1]["role"] == "assistant" and not (self.messages[-1].get("content") or "").strip():
+                self.messages[-1]["content"] = fallback

@@ -4,7 +4,7 @@ import os
 import time
 import argparse
 import re
-import hashlib
+import tempfile
 import uuid
 from urllib.parse import urlparse
 from pathlib import Path
@@ -80,7 +80,7 @@ def normalize_url(u: str) -> str:
     if u.lower().startswith('www.'): return 'http://' + u
     return u
 
-async def fetch_url_content(url: str) -> Path:
+async def fetch_url_content(url: str) -> str:
     try:
         from bs4 import BeautifulSoup
     except ImportError:
@@ -112,34 +112,34 @@ async def fetch_url_content(url: str) -> Path:
                 resp = await client.get(target, headers=headers)
             return resp.status_code, (resp.headers.get('content-type') or ''), (resp.text or '')
 
-    async def playwright_get_html(target: str, profile_dir: Path) -> str:
+    async def playwright_get_html(target: str) -> str:
         try:
             from playwright.async_api import async_playwright
         except ImportError:
-            raise RuntimeError("403 from target; install Playwright: `pip install playwright` then `playwright install chromium`")
+            raise RuntimeError("403 from target; install Playwright: <!--CODE_BLOCK_71337--> then <!--CODE_BLOCK_71338-->")
 
-        profile_dir.mkdir(parents=True, exist_ok=True)
         headless = os.getenv('AI_CHAT_PLAYWRIGHT_HEADLESS', '').strip() in {'1', 'true', 'yes'}
-        async with async_playwright() as p:
-            ctx = await p.chromium.launch_persistent_context(
-                str(profile_dir),
-                headless=headless,  # set AI_CHAT_PLAYWRIGHT_HEADLESS=1 to force headless
-                args=['--disable-blink-features=AutomationControlled'],
-            )
-            try:
-                page = await ctx.new_page()
-                await page.goto(target, wait_until='networkidle', timeout=60_000)
-                return await page.content()
-            finally:
-                with contextlib.suppress(Exception):
-                    await ctx.close()
+        with tempfile.TemporaryDirectory(prefix='ai-chat-pw-') as d:
+            profile_dir = Path(d) / 'profile'
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            async with async_playwright() as p:
+                ctx = await p.chromium.launch_persistent_context(
+                    str(profile_dir),
+                    headless=headless,
+                    args=['--disable-blink-features=AutomationControlled'],
+                )
+                try:
+                    page = await ctx.new_page()
+                    await page.goto(target, wait_until='networkidle', timeout=60_000)
+                    return await page.content()
+                finally:
+                    with contextlib.suppress(Exception):
+                        await ctx.close()
 
     status, ctype, html = await httpx_get_html(u)
     if status == 403:
-        cache_root = Path.home() / '.cache' / 'ai-chat' / 'web'
-        html = await playwright_get_html(u, cache_root / 'pw-profile')
-        ctype = 'text/html'
-        status = 200
+        html = await playwright_get_html(u)
+        ctype, status = 'text/html', 200
 
     if status >= 400:
         raise httpx.HTTPStatusError(f'{status} {u}', request=None, response=None)
@@ -164,19 +164,8 @@ async def fetch_url_content(url: str) -> Path:
         blocks.append(txt)
 
     text = '\n\n'.join(blocks) or soup.get_text('\n', strip=True)
-
-    parsed = urlparse(u)
-    host = parsed.netloc.replace(':', '_')
-    slug = re.sub(r'[^a-zA-Z0-9]+', '-', (title or parsed.path.strip('/') or 'page')).strip('-').lower()
-    h = hashlib.sha1(u.encode('utf-8')).hexdigest()[:8]
-    name = f'{host}__{slug or "page"}__{h}.md'
-
-    cache_dir = Path.home() / '.cache' / 'ai-chat' / 'web'
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / name
-    content = f'# {title or u}\n\nSource: {u}\n\n{text}\n'
-    path.write_text(content, encoding='utf-8')
-    return path
+    hdr = f"URL: {u}\n" + (f"Title: {title}\n" if title else '')
+    return hdr + "\n" + text + "\n"
 
 async def run_timer(label, storage_tab):
     start = time.time()
@@ -200,6 +189,7 @@ async def main_page():
         'answer_counter': 0, 'msg_counter': 0, 'file_results': [],
         'file_idx': -1, 'edit_history': [], 'pending_edits_text': None,
         'apply_all_bubble': None, 'last_edit_round_status': None,
+        'url_attachments': [],
         # Streaming state
         'session_id': str(uuid.uuid4()), 'stream_buffer': [],
         'stream_done': False, 'stream_error': None, 'render_pos': 0,
@@ -281,6 +271,15 @@ async def main_page():
                     ui.label(f'Attached: {name}').classes('text-green-300 text-sm')
                     ui.button(icon='close', on_click=lambda p=path: remove_file(p)).props('flat dense size=sm').classes('text-green-400')
 
+    def show_url(item):
+        url = (item or {}).get('url') or ''
+        with s['container']:
+            with ui.element('div').classes('flex justify-center mb-3'):
+                with ui.element('div').classes('bg-purple-900 border border-purple-700 rounded-lg px-3 py-2 flex items-center gap-2'):
+                    ui.icon('link').classes('text-purple-300')
+                    ui.label(f'Attached URL: {url}').classes('text-purple-200 text-sm')
+                    ui.button(icon='close', on_click=lambda u=url: remove_url(u)).props('flat dense size=sm').classes('text-purple-300')
+
     def show_edit_bubble(key, status='pending', lines_info='', record=True):
         name = Path(key).name
         with s['container']:
@@ -307,6 +306,13 @@ async def main_page():
         else:
             ui.notify('Nothing to revert', type='warning')
 
+    def remove_url(url: str):
+        s['url_attachments'] = [x for x in (s.get('url_attachments') or []) if x.get('url') != url]
+        if s.get('streaming'):
+            ui.notify('URL removed; changes will reflect after the response finishes.', type='info')
+            return
+        refresh_ui()
+
     def remove_file(path):
         with contextlib.suppress(ValueError):
             s['chat'].files.remove(path)
@@ -323,6 +329,8 @@ async def main_page():
                 asyncio.create_task(run_timer(t, s))
         for p in s['chat'].files:
             show_file(p)
+        for item in (s.get('url_attachments') or []):
+            show_url(item)
         for item in (s.get('edit_history') or []):
             show_edit_bubble(item['path'], item.get('status', 'success'), item.get('info', ''), record=False)
 
@@ -494,14 +502,22 @@ async def main_page():
 
         note = clear_edit_round_state(before_send=True)
         mode = mode_select.value
+
+        urls = s.get('url_attachments') or []
+        url_blob = '\n\n'.join((x.get('content') or '').rstrip() for x in urls if (x.get('content') or '').strip())
+
         user_display = f"{note}\n\n{msg}" if note else msg
+        if url_blob:
+            user_display += f"\n\nAttached URLs:\n{url_blob}"
+
         show_message('user', user_display)
-        
         to_send = f"{user_display}\n\n{EXTRACT_ADD_ON}" if mode == 'extract' else user_display
+
         s['draft'] = ''
         input_field.value = ''
         s['streaming'] = True
-        
+        s['url_attachments'] = []
+
         timer = show_message('assistant', '')
         if timer: asyncio.create_task(run_timer(timer, s))
 
@@ -517,7 +533,7 @@ async def main_page():
                         if not s.get('answer_started'):
                             s['stream_buffer'].append(chunk.text or '')
                         continue
-                    
+
                     if not s.get('answer_started'):
                         s['answer_started'] = True
                         cont = s.get('answer_container')
@@ -526,7 +542,7 @@ async def main_page():
                         s['answer_md'] = None
                         s['stream_buffer'] = []
                         s['render_pos'] = 0
-                    
+
                     s['stream_buffer'].append(chunk or '')
             except asyncio.CancelledError:
                 pass
@@ -557,26 +573,27 @@ async def main_page():
         if s.get('streaming'): stop_streaming()
         stop_consumer()
         cancel_producer()
-        
+
         clear_edit_round_state()
         with contextlib.suppress(Exception):
             stream = s.pop('stream', None)
             if hasattr(stream, 'aclose'):
                 asyncio.create_task(stream.aclose())
-        
+
         reset_stream_state()
         s['chat'] = ChatClient()
         s['draft'] = ''
-        
+        s['url_attachments'] = []
+
         for k in ('answer_md', 'answer_container', 'answer_id'):
             s.pop(k, None)
-        
+
         s['answer_counter'] = 0
         s['msg_counter'] = 0
         s['file_results'] = []
         s['file_idx'] = -1
         s['edit_history'] = []
-        
+
         with contextlib.suppress(Exception): input_field.value = ''
         c = s.get('container')
         if c: c.clear()
@@ -619,11 +636,14 @@ async def main_page():
 
     async def attach_url(url: str):
         try:
-            path = await fetch_url_content(url)
-            if str(path) not in s['chat'].files:
-                s['chat'].files.append(str(path))
-                show_file(str(path))
-            
+            u = normalize_url(url)
+            content = await fetch_url_content(u)
+            items = (s.get('url_attachments') or [])
+            if not any(x.get('url') == u for x in items):
+                items.append({'url': u, 'content': content})
+                s['url_attachments'] = items
+                show_url(items[-1])
+
             file_search.value = ''
             s['file_idx'] = -1
             s['file_results'] = []
