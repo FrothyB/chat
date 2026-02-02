@@ -51,18 +51,29 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
                 if not item.is_file(): continue
                 rel = rel_of(item)
                 if rel and rx.match(rel): results.append(rel)
-        return sorted(set(results))
+        return sorted(set(results))[:max_results]
 
-    results, ql = [], q.lower()
+    terms = [t.lower() for t in re.split(r'\s+', q) if t]
+    if not terms: return []
+
+    results = []
     with contextlib.suppress(Exception):
         for item in base.rglob('*'):
             if len(results) >= max_results: break
             if not item.is_file(): continue
             rel = rel_of(item)
             if not rel or any(p.startswith('.') for p in Path(rel).parts): continue
-            if ql not in item.name.lower(): continue
             if item.suffix.lower() not in FILE_LIKE_EXTS: continue
+
+            rell, name = rel.lower(), item.name.lower()
+            if len(terms) == 1:
+                if terms[0] not in name: continue
+            else:
+                if not all(t in rell for t in terms): continue
+                if not any(t in name for t in terms): continue
+
             results.append(rel)
+
     return sorted(set(results))[:max_results]
 
 def _with_line_tokens(text: str, every: int = LINE_NUMBER_EVERY) -> str:
@@ -333,10 +344,17 @@ class ChatClient:
                 replaces.append(ReplaceBlock(start=a, end=b, new=mnew.group(2), lang=(mnew.group(1) or '').strip()))
                 pos = mnew.end()
 
-            first_rep = self._REP_HDR_RE.search(section)
-            expl = section[:first_rep.start()].strip() if first_rep else section.strip()
-            out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces))
+            if not replaces:
+                w = self._WITH_HDR_RE.search(section)
+                mnew = self._CODE_FENCE_RE.search(section, w.end()) if w else None
+                if mnew:
+                    replaces = [ReplaceBlock(start=0, end=0, new=mnew.group(2), lang=(mnew.group(1) or '').strip())]
 
+            first_rep = self._REP_HDR_RE.search(section)
+            first_with = self._WITH_HDR_RE.search(section)
+            first_hdr = first_rep.start() if first_rep else (first_with.start() if first_with else None)
+            expl = section[:first_hdr].strip() if first_hdr is not None else section.strip()
+            out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces))
         return out
 
     def _resolve_path(self, filename: str, create_if_missing: bool = False) -> Optional[str]:
@@ -429,7 +447,28 @@ class ChatClient:
                 original = p.read_text(encoding='utf-8') if not is_new else ''
 
                 if not d.replaces:
-                    results.append(EditEvent('error', Path(rel).name, 'No REPLACE ranges found', rel)); continue
+                    results.append(EditEvent('error', Path(rel).name, 'No WITH/REPLACE blocks found', rel)); continue
+
+                full = [b for b in d.replaces if b.start == 0 and b.end == 0]
+                if full:
+                    if len(full) != 1 or len(d.replaces) != 1:
+                        results.append(EditEvent('error', Path(rel).name, 'WITH-only edits must contain exactly one fenced block', rel)); continue
+
+                    body = self._norm_newlines(full[0].new)
+                    if is_new:
+                        norm2 = body.rstrip('\n')
+                        updated = norm2 + ('\n' if norm2 else '')
+                    else:
+                        eol = '\r\n' if '\r\n' in original else '\n'
+                        had_final_nl = self._norm_newlines(original).endswith('\n')
+                        norm2 = body.rstrip('\n')
+                        updated = (norm2 + ('\n' if had_final_nl else '')).replace('\n', eol)
+
+                    _remember_prev(rel)
+                    self._atomic_write(p, updated)
+                    tx['changed'].add(rel)
+                    results.append(EditEvent('complete', Path(rel).name, f"{'created' if is_new else 'rewritten'}: {_count_lines(original) if not is_new else 0} → {_count_lines(updated)} lines", rel))
+                    continue
 
                 if is_new:
                     parts = [self._norm_newlines(b.new).rstrip('\n') for b in d.replaces]
@@ -440,7 +479,6 @@ class ChatClient:
                     tx['changed'].add(rel)
                     results.append(EditEvent('complete', Path(rel).name, f"created: 0 → {_count_lines(updated)} lines", rel))
                     continue
-
                 eol = '\r\n' if '\r\n' in original else '\n'
                 norm = self._norm_newlines(original)
                 had_final_nl = norm.endswith('\n')

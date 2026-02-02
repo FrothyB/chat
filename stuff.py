@@ -49,12 +49,12 @@ The X-Y indicate line numbers you wish to replace;
 Use the appropriate language for syntax highlighting in fences;
 Be surgical with your replacements;
 However, when changes are major it may be cleaner to replace/rewrite the majority of or the entire file in one large block;
-Rewrites can be done exclusively with EDIT/REPLACE/WITH commands;
 A WITH can be empty;
 Remove code that will become dead after your edits;
 Don't add comments to replace removed code, just delete it entirely;
 All file paths are relative to a base directory, and you must always specify the full relative path in the EDIT line;
-You may use an EDIT/REPLACE/WITH to create a new file, in which case the replace line numbers will be ignored;
+Omitting REPLACE and using only EDIT/WITH will perform a full file replacement or creation;
+REPLACE if used will be ignored when creating new files;
 When instructed to create new files, identify a suitable location, typically in the same directory as related files;
 You may create new files to implement new functionality or to refactor existing code when doing so would be clearly beneficial.
 
