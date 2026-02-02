@@ -198,7 +198,7 @@ class ChatClient:
             if chat and edit: break
         self._chat_prompt_injected, self._edit_prompt_injected = chat, edit
 
-    async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = "minimal"
+    async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = "minimal", force_edit: bool = False
                             ) -> AsyncGenerator[Union[str, ReasoningEvent], None]:
         msg_index = len(self.messages)
         if self.files: self.message_files[msg_index] = self.files.copy()
@@ -208,7 +208,8 @@ class ChatClient:
             prefix += CHAT_PROMPT
             self._chat_prompt_injected = True
 
-        if self._EDIT_TRIGGER_RE.search((user_msg or '').lower()) and not self._edit_prompt_injected:
+        want_edit = force_edit or bool(self._EDIT_TRIGGER_RE.search((user_msg or '').lower()))
+        if want_edit and not self._edit_prompt_injected:
             prefix += EDIT_PROMPT
             self._edit_prompt_injected = True
 

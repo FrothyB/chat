@@ -185,7 +185,7 @@ async def main_page():
     # Persistent state defaults
     defaults = {
         'chat': ChatClient(), 'draft': '', 'model': DEFAULT_MODEL,
-        'reasoning': DEFAULT_REASONING, 'mode': 'chat', 'streaming': False,
+        'reasoning': DEFAULT_REASONING, 'mode': 'chat+edit', 'streaming': False,
         'answer_counter': 0, 'msg_counter': 0, 'file_results': [],
         'file_idx': -1, 'edit_history': [], 'pending_edits_text': None,
         'apply_all_bubble': None, 'last_edit_round_status': None,
@@ -522,7 +522,7 @@ async def main_page():
         if timer: asyncio.create_task(run_timer(timer, s))
 
         reset_stream_state()
-        stream = s['chat'].stream_message(to_send, model_select.value, reasoning_select.value)
+        stream = s['chat'].stream_message(to_send, model_select.value, reasoning_select.value, force_edit=(mode == 'chat+edit'))
         s['stream'] = stream
 
         async def producer():
@@ -759,7 +759,7 @@ async def main_page():
         with ui.row().classes('w-full p-3 gap-2'):
             input_field = ui.textarea(placeholder='Type your message...').props(f'{P_PROPS} rows=4 id=input-field').classes('flex-grow text-white').bind_value(app.storage.tab, 'draft')
             input_field.on('keydown', handle_keydown)
-            mode_select = ui.select(['chat', 'extract'], label='Mode').props(P_PROPS).classes('w-32 text-white').bind_value(app.storage.tab, 'mode')
+            mode_select = ui.select(['chat+edit', 'chat', 'extract'], label='Mode').props(P_PROPS).classes('w-32 text-white').bind_value(app.storage.tab, 'mode')
             with ui.column().classes('gap-2'):
                 ui.button('Back', on_click=undo, icon='undo').bind_visibility_from(s, 'streaming', lambda v: not v).props('color=orange')
                 ui.button('Stop', on_click=stop_streaming, icon='stop').bind_visibility_from(s, 'streaming').props('color=red')

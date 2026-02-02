@@ -46,9 +46,11 @@ EDIT_PROMPT = '''Starting now, if and only if you have been explicitly instructe
 
 Rules:
 The X-Y indicate line numbers you wish to replace;
+Don't try to account for line number changes that arise from other REPLACE commands in the same EDIT section;
 Use the appropriate language for syntax highlighting in fences;
 Be surgical with your replacements;
 However, when changes are major it may be cleaner to replace/rewrite the majority of or the entire file in one large block;
+In all cases, reason and plan about you REPLACE commands and their line numbers before beginning your answer;
 A WITH can be empty;
 Remove code that will become dead after your edits;
 Don't add comments to replace removed code, just delete it entirely;
