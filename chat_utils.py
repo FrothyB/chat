@@ -350,10 +350,16 @@ class ChatClient:
                 mnew = self._CODE_FENCE_RE.search(section, w.end()) if w else None
                 if mnew:
                     replaces = [ReplaceBlock(start=0, end=0, new=mnew.group(2), lang=(mnew.group(1) or '').strip())]
+                else:
+                    fences = list(self._CODE_FENCE_RE.finditer(section))
+                    if len(fences) == 1:
+                        f = fences[0]
+                        replaces = [ReplaceBlock(start=0, end=0, new=f.group(2), lang=(f.group(1) or '').strip())]
 
             first_rep = self._REP_HDR_RE.search(section)
             first_with = self._WITH_HDR_RE.search(section)
-            first_hdr = first_rep.start() if first_rep else (first_with.start() if first_with else None)
+            first_fence = self._CODE_FENCE_RE.search(section)
+            first_hdr = min([x.start() for x in (first_rep, first_with, first_fence) if x], default=None)
             expl = section[:first_hdr].strip() if first_hdr is not None else section.strip()
             out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces))
         return out
