@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_MODEL = "openai/gpt-5.2"
 DEFAULT_REASONING = "medium"
-MODELS = ["google/gemini-3-pro-preview", "google/gemini-3-flash-preview", "openai/gpt-5.2", "openai/gpt-5.2-pro", "anthropic/claude-4.5-opus", "moonshotai/kimi-k2.5", "openai/gpt-oss-120b"]
+MODELS = ["google/gemini-3-pro-preview", "google/gemini-3-flash-preview", "openai/gpt-5.2", "openai/gpt-5.2-pro", "anthropic/claude-4.5-opus", "qwen/qwen3-coder-next", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 FILE_LIKE_EXTS = {".py",".pyw",".ipynb",".js",".mjs",".cjs",".ts",".tsx",".c",".cc",".cpp",".cxx",".h",".hpp",".hh",".hxx",".go",".rs",".cs",".java",".html",".htm",".css",".md",".markdown",".txt",".rst",".json",".yaml",".yml",".toml",".sql",".sh",".bash",".zsh",".bat",".ps1"}
@@ -31,46 +31,62 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
     q = (query or '').strip().replace('\\', '/')
     if not q: return []
 
-    if any(ch in q for ch in ('*', '?')):
-        pat = os.path.expanduser(q) if q.startswith('~') else q
-        if pat.startswith('/'):
-            try: pat = Path(pat).resolve().relative_to(base).as_posix()
-            except Exception: return []
+    toks = [t for t in re.split(r'\s+', q) if t]
+    if not toks: return []
 
-        def to_regex(p: str) -> re.Pattern:
-            buf = []
-            for ch in p:
-                if ch == '*': buf.append('.*')
-                elif ch == '?': buf.append('.')
-                else: buf.append(re.escape(ch))
-            return re.compile('^' + ''.join(buf) + '$', re.IGNORECASE)
+    def to_regex(pat: str) -> re.Pattern:
+        buf = []
+        for ch in pat:
+            if ch == '*': buf.append('.*')
+            elif ch == '?': buf.append('.')
+            else: buf.append(re.escape(ch))
+        return re.compile('^' + ''.join(buf) + '$', re.IGNORECASE)
 
-        rx, results = to_regex(pat), []
+    patterns, terms = [], []
+    for t in toks:
+        (patterns if any(ch in t for ch in ('*', '?')) else terms).append(t)
+
+    def ok_common(item: Path, rel: str) -> bool:
+        return not any(p.startswith('.') for p in Path(rel).parts) and item.suffix.lower() in FILE_LIKE_EXTS
+
+    if patterns:
+        pats = []
+        for pat in patterns:
+            pat = os.path.expanduser(pat) if pat.startswith('~') else pat
+            if pat.startswith('/'):
+                try: pat = Path(pat).resolve().relative_to(base).as_posix()
+                except Exception: return []
+            pats.append((to_regex(pat), '/' not in pat))  # (rx, match_basename)
+
+        tset = [t.lower() for t in terms]
+        results: List[str] = []
         with contextlib.suppress(Exception):
             for item in base.rglob('*'):
+                if len(results) >= max_results: break
                 if not item.is_file(): continue
                 rel = rel_of(item)
-                if rel and rx.match(rel): results.append(rel)
+                if not rel or not ok_common(item, rel): continue
+                if any(not rx.match(item.name if on_name else rel) for rx, on_name in pats): continue
+                rell = rel.lower()
+                if any(t not in rell for t in tset): continue
+                results.append(rel)
         return sorted(set(results))[:max_results]
 
-    terms = [t.lower() for t in re.split(r'\s+', q) if t]
-    if not terms: return []
-
-    results = []
+    terms_l = [t.lower() for t in terms]
+    results: List[str] = []
     with contextlib.suppress(Exception):
         for item in base.rglob('*'):
             if len(results) >= max_results: break
             if not item.is_file(): continue
             rel = rel_of(item)
-            if not rel or any(p.startswith('.') for p in Path(rel).parts): continue
-            if item.suffix.lower() not in FILE_LIKE_EXTS: continue
+            if not rel or not ok_common(item, rel): continue
 
             rell, name = rel.lower(), item.name.lower()
-            if len(terms) == 1:
-                if terms[0] not in name: continue
+            if len(terms_l) == 1:
+                if terms_l[0] not in name: continue
             else:
-                if not all(t in rell for t in terms): continue
-                if not any(t in name for t in terms): continue
+                if not all(t in rell for t in terms_l): continue
+                if not any(t in name for t in terms_l): continue
 
             results.append(rel)
 
