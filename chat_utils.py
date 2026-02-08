@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_MODEL = "openai/gpt-5.2"
 DEFAULT_REASONING = "medium"
-MODELS = ["google/gemini-3-pro-preview", "google/gemini-3-flash-preview", "openai/gpt-5.2", "openai/gpt-5.2-pro", "anthropic/claude-4.5-opus", "qwen/qwen3-coder-next", "openai/gpt-oss-120b"]
+MODELS = ["google/gemini-3-flash-preview", "openai/gpt-5.2", "openai/gpt-5.2-pro", "anthropic/claude-4.6-opus", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 FILE_LIKE_EXTS = {".py",".pyw",".ipynb",".js",".mjs",".cjs",".ts",".tsx",".c",".cc",".cpp",".cxx",".h",".hpp",".hh",".hxx",".go",".rs",".cs",".java",".html",".htm",".css",".md",".markdown",".txt",".rst",".json",".yaml",".yml",".toml",".sql",".sh",".bash",".zsh",".bat",".ps1"}
@@ -141,20 +141,18 @@ class EditEvent:
     details: str = ''
     path: Optional[str] = None
 
-
 @dataclass
 class ReasoningEvent:
     kind: str = 'reasoning'
     text: str = ''
-
 
 @dataclass
 class ReplaceBlock:
     start: int
     end: int
     new: str
+    old: str = ''
     lang: str = ''
-
 
 @dataclass
 class EditDirective:
@@ -168,13 +166,14 @@ class ChatClient:
 
     _SEC_HDR_RE = re.compile(r'(?im)^###\s*(EDIT)\s+(.+?)\s*$')
     _CODE_FENCE_RE = re.compile(r'```[ \t]*([^\n]*)\n(.*?)```', re.DOTALL)
-    _REP_HDR_RE = re.compile(r'(?im)^####\s*REPLACE\s+(\d+)(?:\s*-\s*(\d+))?\s*$')
-    _WITH_HDR_RE = re.compile(r'(?im)^####\s*WITH\s*$')
+    _REP_HDR_RE = re.compile(r'(?im)^####\s*REPLACE\s*$')
+    _LINES_HDR_RE = re.compile(r'(?im)^####\s*LINES\s+(\d+)(?:\s*-\s*(\d+))?\s*$')
 
     _SEC_EDIT_LINE_RE = re.compile(r'(?im)^\s*###\s*EDIT\s+(.+?)\s*$')
-    _REP_RANGE_LINE_RE = re.compile(r'(?im)^\s*####\s*REPLACE\s+(\d+)(?:\s*-\s*(\d+))?\s*$')
-    _WITH_LINE_RE = re.compile(r'(?im)^\s*####\s*WITH\s*$')
+    _REP_LINE_RE = re.compile(r'(?im)^\s*####\s*REPLACE\s*$')
+    _LINES_LINE_RE = re.compile(r'(?im)^\s*####\s*LINES\s+(\d+)(?:\s*-\s*(\d+))?\s*$')
     _FENCE_OPEN_LINE_RE = re.compile(r'(?m)^\s*```[ \t]*([^\n]*)\s*$')
+    _FENCE_ANY_LINE_RE = re.compile(r'(?m)^\s*```')
 
     def __init__(self):
         self.messages = [{"role": "system", "content": ""}]
@@ -263,7 +262,7 @@ class ChatClient:
         except (asyncio.CancelledError, GeneratorExit):
             raise
 
-    # --- Display-only expansion for "####REPLACE a-b" ---
+    # --- Display-only expansion: inject file text for "####LINES a-b" under "####REPLACE" ---
 
     def _get_file_lines_cached(self, rel: str) -> Optional[List[str]]:
         try:
@@ -292,42 +291,64 @@ class ChatClient:
         lines = md.split('\n')
         out: List[str] = []
         cur_edit_file: Optional[str] = None
+        pending: Optional[Dict[str, object]] = None  # {"rep": str, "between": List[str]}
 
-        def fence_lang_after_with(from_idx: int) -> Optional[str]:
-            for j in range(from_idx + 1, len(lines) - 1):
+        def fence_lang_after_lines(from_idx: int) -> Optional[str]:
+            for j in range(from_idx + 1, len(lines)):
                 if self._SEC_HDR_RE.match(lines[j]): return None
-                if self._WITH_LINE_RE.match(lines[j]):
-                    m = self._FENCE_OPEN_LINE_RE.match(lines[j + 1] if j + 1 < len(lines) else '')
-                    return (m.group(1) or '').strip() if m else None
+                m = self._FENCE_OPEN_LINE_RE.match(lines[j])
+                if m: return (m.group(1) or '').strip()
             return None
+
+        def flush_pending():
+            nonlocal pending
+            if not pending: return
+            out.append(pending["rep"])  # type: ignore[index]
+            out += (pending["between"] or [])  # type: ignore[operator]
+            pending = None
 
         for i, line in enumerate(lines):
             msec = self._SEC_EDIT_LINE_RE.match(line)
             if msec:
+                flush_pending()
                 cur_edit_file = (msec.group(1) or '').strip().replace('`', '')
                 out.append(line); continue
+
             if self._SEC_HDR_RE.match(line) and not msec:
+                flush_pending()
                 cur_edit_file = None
                 out.append(line); continue
 
-            mrep = self._REP_RANGE_LINE_RE.match(line) if cur_edit_file else None
-            if not mrep:
-                out.append(line); continue
+            if cur_edit_file and self._REP_LINE_RE.match(line):
+                flush_pending()
+                pending = {"rep": line, "between": []}
+                continue
 
-            a = int(mrep.group(1))
-            b = int(mrep.group(2) or mrep.group(1))
-            lang = fence_lang_after_with(i)
+            if cur_edit_file and pending:
+                mlines = self._LINES_LINE_RE.match(line)
+                if not mlines:
+                    pending["between"].append(line)  # type: ignore[index]
+                    continue
+
+                a = int(mlines.group(1))
+                b = int(mlines.group(2) or mlines.group(1))
+                lang = fence_lang_after_lines(i)
+                path = self._resolve_path(cur_edit_file, create_if_missing=False)
+                file_lines = self._get_file_lines_cached(path) if path else None
+
+                between = pending["between"] or []  # type: ignore[assignment]
+                should_inject = bool(lang and file_lines and (1 <= a <= b <= len(file_lines)) and not any(self._FENCE_ANY_LINE_RE.match(x) for x in between))
+                out.append(pending["rep"])  # type: ignore[index]
+                out += between
+                if should_inject:
+                    out += [f"```{lang}".rstrip(), '\n'.join(file_lines[a - 1:b]), "```"]
+                pending = None
+                out.append(line)
+                continue
+
             out.append(line)
-            if not lang:  # wait until WITH fence reveals language
-                continue
 
-            path = self._resolve_path(cur_edit_file, create_if_missing=False)
-            file_lines = self._get_file_lines_cached(path) if path else None
-            if not file_lines or not (1 <= a <= b <= len(file_lines)):
-                continue
-
-            out += [f"```{lang}".rstrip(), '\n'.join(file_lines[a - 1:b]), "```"]
-
+        flush_pending()
         return '\n'.join(out)
 
     def set_last_assistant_display(self, display_md: str) -> None:
@@ -353,31 +374,27 @@ class ChatClient:
             while True:
                 r = self._REP_HDR_RE.search(section, pos)
                 if not r: break
-                w = self._WITH_HDR_RE.search(section, r.end())
-                if not w: break
-                mnew = self._CODE_FENCE_RE.search(section, w.end())
+                l = self._LINES_HDR_RE.search(section, r.end())
+                if not l: break
+                mnew = self._CODE_FENCE_RE.search(section, l.end())
                 if not mnew: break
-                a, b = int(r.group(1)), int(r.group(2) or r.group(1))
-                replaces.append(ReplaceBlock(start=a, end=b, new=mnew.group(2), lang=(mnew.group(1) or '').strip()))
+                a, b = int(l.group(1)), int(l.group(2) or l.group(1))
+                old = section[r.end():l.start()].strip('\n')
+                replaces.append(ReplaceBlock(start=a, end=b, new=mnew.group(2), old=old, lang=(mnew.group(1) or '').strip()))
                 pos = mnew.end()
 
             if not replaces:
-                w = self._WITH_HDR_RE.search(section)
-                mnew = self._CODE_FENCE_RE.search(section, w.end()) if w else None
-                if mnew:
-                    replaces = [ReplaceBlock(start=0, end=0, new=mnew.group(2), lang=(mnew.group(1) or '').strip())]
-                else:
-                    fences = list(self._CODE_FENCE_RE.finditer(section))
-                    if len(fences) == 1:
-                        f = fences[0]
-                        replaces = [ReplaceBlock(start=0, end=0, new=f.group(2), lang=(f.group(1) or '').strip())]
+                fences = list(self._CODE_FENCE_RE.finditer(section))
+                if len(fences) == 1:
+                    f = fences[0]
+                    replaces = [ReplaceBlock(start=0, end=0, new=f.group(2), lang=(f.group(1) or '').strip())]
 
             first_rep = self._REP_HDR_RE.search(section)
-            first_with = self._WITH_HDR_RE.search(section)
             first_fence = self._CODE_FENCE_RE.search(section)
-            first_hdr = min([x.start() for x in (first_rep, first_with, first_fence) if x], default=None)
+            first_hdr = min([x.start() for x in (first_rep, first_fence) if x], default=None)
             expl = section[:first_hdr].strip() if first_hdr is not None else section.strip()
             out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces))
+
         return out
 
     def _resolve_path(self, filename: str, create_if_missing: bool = False) -> Optional[str]:
@@ -470,12 +487,12 @@ class ChatClient:
                 original = p.read_text(encoding='utf-8') if not is_new else ''
 
                 if not d.replaces:
-                    results.append(EditEvent('error', Path(rel).name, 'No WITH/REPLACE blocks found', rel)); continue
+                    results.append(EditEvent('error', Path(rel).name, 'No edit blocks found', rel)); continue
 
                 full = [b for b in d.replaces if b.start == 0 and b.end == 0]
                 if full:
                     if len(full) != 1 or len(d.replaces) != 1:
-                        results.append(EditEvent('error', Path(rel).name, 'WITH-only edits must contain exactly one fenced block', rel)); continue
+                        results.append(EditEvent('error', Path(rel).name, 'Full rewrites must contain exactly one fenced block', rel)); continue
 
                     body = self._norm_newlines(full[0].new)
                     if is_new:
@@ -502,6 +519,7 @@ class ChatClient:
                     tx['changed'].add(rel)
                     results.append(EditEvent('complete', Path(rel).name, f"created: 0 → {_count_lines(updated)} lines", rel))
                     continue
+
                 eol = '\r\n' if '\r\n' in original else '\n'
                 norm = self._norm_newlines(original)
                 had_final_nl = norm.endswith('\n')
@@ -523,7 +541,7 @@ class ChatClient:
                     replaced += 1
 
                 if missing:
-                    results.append(EditEvent('error', Path(rel).name, f"REPLACE range(s) invalid: {', '.join(missing)}", rel)); continue
+                    results.append(EditEvent('error', Path(rel).name, f"LINES range(s) invalid: {', '.join(missing)}", rel)); continue
 
                 norm2 = '\n'.join(lines) + ('\n' if had_final_nl else '')
                 updated = norm2 if eol == '\n' else norm2.replace('\n', '\r\n')
