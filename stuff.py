@@ -45,7 +45,7 @@ EDIT_PROMPT = '''If and only if you have been explicitly instructed to make chan
 
 Rules:
 X-Y indicate inclusive line numbers to replace;
-In line number reasoning, don't insert a preamble or line numbers, just deduce the lines you wish to replace;
+In line number reasoning, don't insert a preamble, just reason about the lines you wish to replace without yet mentioning line numbers;
 Don't account for line number changes that arise from multiple REPLACE commands;
 Use the appropriate language for syntax highlighting;
 Be surgical with your replacements;

@@ -757,7 +757,7 @@ async def main_page():
 
     with ui.element('div').classes('chat-footer'):
         with ui.row().classes('w-full p-3 gap-2'):
-            input_field = ui.textarea(placeholder='Type your message...').props(f'{P_PROPS} rows=4 id=input-field').classes('flex-grow text-white').bind_value(app.storage.tab, 'draft')
+            input_field = ui.textarea(placeholder='Type your message...').props(f'{P_PROPS} autogrow input-class=max-h-100 id=input-field').classes('flex-grow text-white').bind_value(app.storage.tab, 'draft')
             input_field.on('keydown', handle_keydown)
             mode_select = ui.select(['chat+edit', 'chat', 'extract'], label='Mode').props(P_PROPS).classes('w-32 text-white').bind_value(app.storage.tab, 'mode')
             with ui.column().classes('gap-2'):
