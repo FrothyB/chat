@@ -164,14 +164,15 @@ class EditDirective:
 class ChatClient:
     _EDIT_TRIGGER_RE = re.compile(r'\b(?:edit|rewrite)\b')
 
-    _SEC_HDR_RE = re.compile(r'(?im)^###\s*(EDIT)\s+(.+?)\s*$')
+    # New edit schema (breaking):
+    #   "###EDIT path/to/file"
+    #   "###PLAN ..." (ignored)
+    #   "###REPLACE X-Y" followed by a fenced block containing the new text.
+    _EDIT_HDR_RE = re.compile(r'(?m)^\s*###EDIT[ \t]+(.+?)\s*$')
+    _PLAN_HDR_RE = re.compile(r'(?m)^\s*####PLANNING\b.*$')
+    _REPLACE_HDR_RE = re.compile(r'(?m)^\s*####REPLACE[ \t]+(\d+)(?:[ \t]*-[ \t]*(\d+))?\s*$')
     _CODE_FENCE_RE = re.compile(r'```[ \t]*([^\n]*)\n(.*?)```', re.DOTALL)
-    _REP_HDR_RE = re.compile(r'(?im)^####\s*REPLACE\s*$')
-    _LINES_HDR_RE = re.compile(r'(?im)^####\s*LINES\s+(\d+)(?:\s*-\s*(\d+))?\s*$')
 
-    _SEC_EDIT_LINE_RE = re.compile(r'(?im)^\s*###\s*EDIT\s+(.+?)\s*$')
-    _REP_LINE_RE = re.compile(r'(?im)^\s*####\s*REPLACE\s*$')
-    _LINES_LINE_RE = re.compile(r'(?im)^\s*####\s*LINES\s+(\d+)(?:\s*-\s*(\d+))?\s*$')
     _FENCE_OPEN_LINE_RE = re.compile(r'(?m)^\s*```[ \t]*([^\n]*)\s*$')
     _FENCE_ANY_LINE_RE = re.compile(r'(?m)^\s*```')
 
@@ -262,8 +263,7 @@ class ChatClient:
         except (asyncio.CancelledError, GeneratorExit):
             raise
 
-    # --- Display-only expansion: inject file text for "####LINES a-b" under "####REPLACE" ---
-
+    # --- Display-only expansion: inject file text + "WITH" after "###REPLACE a-b" ---
     def _get_file_lines_cached(self, rel: str) -> Optional[List[str]]:
         try:
             rp = Path((rel or '').strip().replace('\\', '/'))
@@ -287,64 +287,66 @@ class ChatClient:
 
     def render_for_display(self, md: str) -> str:
         md = md or ''
-        if '####REPLACE' not in md: return md
+        if '###REPLACE' not in md: return md
+
         lines = md.split('\n')
         out: List[str] = []
         cur_edit_file: Optional[str] = None
-        pending: Optional[Dict[str, object]] = None  # {"rep": str, "between": List[str]}
+        pending: Optional[Dict[str, object]] = None  # {"hdr": str, "a": int, "b": int, "between": List[str]}
 
-        def fence_lang_after_lines(from_idx: int) -> Optional[str]:
-            for j in range(from_idx + 1, len(lines)):
-                if self._SEC_HDR_RE.match(lines[j]): return None
-                m = self._FENCE_OPEN_LINE_RE.match(lines[j])
-                if m: return (m.group(1) or '').strip()
-            return None
-
-        def flush_pending():
+        def flush_pending() -> None:
             nonlocal pending
             if not pending: return
-            out.append(pending["rep"])  # type: ignore[index]
+            out.append(pending["hdr"])  # type: ignore[index]
             out += (pending["between"] or [])  # type: ignore[operator]
             pending = None
 
-        for i, line in enumerate(lines):
-            msec = self._SEC_EDIT_LINE_RE.match(line)
-            if msec:
+        for line in lines:
+            medit = self._EDIT_HDR_RE.match(line)
+            if medit:
                 flush_pending()
-                cur_edit_file = (msec.group(1) or '').strip().replace('`', '')
-                out.append(line); continue
+                cur_edit_file = (medit.group(1) or '').strip().replace('`', '')
+                out.append(line)
+                continue
 
-            if self._SEC_HDR_RE.match(line) and not msec:
+            if self._EDIT_HDR_RE.match(line) and not medit:
                 flush_pending()
                 cur_edit_file = None
-                out.append(line); continue
-
-            if cur_edit_file and self._REP_LINE_RE.match(line):
-                flush_pending()
-                pending = {"rep": line, "between": []}
+                out.append(line)
                 continue
 
             if cur_edit_file and pending:
-                mlines = self._LINES_LINE_RE.match(line)
-                if not mlines:
-                    pending["between"].append(line)  # type: ignore[index]
+                mfence = self._FENCE_OPEN_LINE_RE.match(line)
+                if mfence:
+                    lang = (mfence.group(1) or '').strip()
+                    a, b = int(pending["a"]), int(pending["b"])  # type: ignore[arg-type]
+                    path = self._resolve_path(cur_edit_file, create_if_missing=False)
+                    file_lines = self._get_file_lines_cached(path) if path else None
+                    between = pending["between"] or []  # type: ignore[assignment]
+                    should_inject = bool(lang and file_lines and (1 <= a <= b <= len(file_lines)) and not any(self._FENCE_ANY_LINE_RE.match(x) for x in between))
+                    out.append(pending["hdr"])  # type: ignore[index]
+                    out += between
+                    if should_inject:
+                        out += [f"```{lang}".rstrip(), '\n'.join(file_lines[a - 1:b]), "```", "####WITH"]
+                    pending = None
+                    out.append(line)
                     continue
 
-                a = int(mlines.group(1))
-                b = int(mlines.group(2) or mlines.group(1))
-                lang = fence_lang_after_lines(i)
-                path = self._resolve_path(cur_edit_file, create_if_missing=False)
-                file_lines = self._get_file_lines_cached(path) if path else None
+                mrep2 = self._REPLACE_HDR_RE.match(line)
+                if mrep2:
+                    flush_pending()
+                    pending = {"hdr": line, "a": int(mrep2.group(1)), "b": int(mrep2.group(2) or mrep2.group(1)), "between": []}
+                    continue
 
-                between = pending["between"] or []  # type: ignore[assignment]
-                should_inject = bool(lang and file_lines and (1 <= a <= b <= len(file_lines)) and not any(self._FENCE_ANY_LINE_RE.match(x) for x in between))
-                out.append(pending["rep"])  # type: ignore[index]
-                out += between
-                if should_inject:
-                    out += [f"```{lang}".rstrip(), '\n'.join(file_lines[a - 1:b]), "```"]
-                pending = None
-                out.append(line)
+                pending["between"].append(line)  # type: ignore[index]
                 continue
+
+            if cur_edit_file:
+                mrep = self._REPLACE_HDR_RE.match(line)
+                if mrep:
+                    flush_pending()
+                    pending = {"hdr": line, "a": int(mrep.group(1)), "b": int(mrep.group(2) or mrep.group(1)), "between": []}
+                    continue
 
             out.append(line)
 
@@ -356,15 +358,14 @@ class ChatClient:
             self._display_overrides[self._last_assistant_index] = display_md or ''
 
     # --- Edit parsing + applying (line ranges only) ---
-
     def parse_edit_markdown(self, md: str) -> List[EditDirective]:
         if not md: return []
         text = self._norm_newlines(md)
-        matches = list(self._SEC_HDR_RE.finditer(text))
+        matches = list(self._EDIT_HDR_RE.finditer(text))
         out: List[EditDirective] = []
 
         for i, m in enumerate(matches):
-            filename = (m.group(2) or '').strip().replace('`', '')
+            filename = (m.group(1) or '').strip().replace('`', '')
             start = m.end()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
             section = text[start:end].strip()
@@ -372,15 +373,12 @@ class ChatClient:
             replaces: List[ReplaceBlock] = []
             pos = 0
             while True:
-                r = self._REP_HDR_RE.search(section, pos)
+                r = self._REPLACE_HDR_RE.search(section, pos)
                 if not r: break
-                l = self._LINES_HDR_RE.search(section, r.end())
-                if not l: break
-                mnew = self._CODE_FENCE_RE.search(section, l.end())
+                mnew = self._CODE_FENCE_RE.search(section, r.end())
                 if not mnew: break
-                a, b = int(l.group(1)), int(l.group(2) or l.group(1))
-                old = section[r.end():l.start()].strip('\n')
-                replaces.append(ReplaceBlock(start=a, end=b, new=mnew.group(2), old=old, lang=(mnew.group(1) or '').strip()))
+                a, b = int(r.group(1)), int(r.group(2) or r.group(1))
+                replaces.append(ReplaceBlock(start=a, end=b, new=mnew.group(2), lang=(mnew.group(1) or '').strip()))
                 pos = mnew.end()
 
             if not replaces:
@@ -389,10 +387,8 @@ class ChatClient:
                     f = fences[0]
                     replaces = [ReplaceBlock(start=0, end=0, new=f.group(2), lang=(f.group(1) or '').strip())]
 
-            first_rep = self._REP_HDR_RE.search(section)
-            first_fence = self._CODE_FENCE_RE.search(section)
-            first_hdr = min([x.start() for x in (first_rep, first_fence) if x], default=None)
-            expl = section[:first_hdr].strip() if first_hdr is not None else section.strip()
+            expl_cut = min([x.start() for x in (self._REPLACE_HDR_RE.search(section), self._CODE_FENCE_RE.search(section)) if x], default=None)
+            expl = section[:expl_cut].strip() if expl_cut is not None else section.strip()
             out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces))
 
         return out

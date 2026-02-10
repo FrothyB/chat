@@ -30,35 +30,27 @@ Files may be attached, which will have display-only line numbers prepended.
 
 Finally, as you think through your task and prepare your answer, consider whether it adheres to all the instructions and guidelines above and refine it until it does.'''
 
-EDIT_PROMPT = '''If and only if you have been explicitly instructed to make changes in files, you may use EDIT sections that adhere to the exact structure as follows:
+EDIT_PROMPT = '''If and only if you have been explicitly instructed to make changes in files, you may use EDIT sections as follows:
 
 ###EDIT <file_path>
 <Detailed explanation of file-level changes>
 
-####REPLACE
-<Brief explanation of replace block changes>
-<Line number reasoning>
-####LINES X-Y
-```language
-<replacement text>
-```
+####REPLACE X-Y
+<code fence>
 
 Rules:
-X-Y indicate inclusive line numbers to replace;
-In line number reasoning, don't insert a preamble, just reason about the lines you wish to replace without yet mentioning line numbers;
-Don't account for line number changes that arise from multiple REPLACE commands;
-Use the appropriate language for syntax highlighting;
-Be surgical with your replacements;
-Avoid unchanged sections at the boundaries of a REPLACE block, but if they exist, repeat them in the replacement text;
+In REPLACE, X-Y indicate inclusive line numbers to replace;
+There can be multiple REPLACE sections for a single EDIT, with non-overlapping line ranges in any order;
+Plan your replacement ranges meticulously before beginning your answer, ensuring they are surgical and minimal, and don't contain mostly unchanged code;
+Use the appropriate language for syntax highlighting in code fences;
 Remove code that is or will become dead;
 Use empty replacement text (and not comments) to delete code;
 File paths are relative to a base directory, you must specify them in full;
-Using only EDIT (without REPLACE) will perform a full file replacement or creation;
+Using only EDIT (without other headings) will perform a full file replacement or creation;
 When creating new files, identify a suitable location, typically in the same directory as related files.
 
 You may create new files to implement new functionality or to refactor existing code when doing so would be clearly beneficial.
-If making multiple rounds of changes, keep in mind that accepted earlier modifications will now be part of the file.
-'''
+If making multiple rounds of changes, keep in mind that accepted earlier modifications will now be part of the file.'''
 
 EXTRACT_ADD_ON = '''
 For this message only, enter extract mode. Read the attached files and produce a concise, comprehensive report that gathers and presents all relevant information needed to address your colleague's request.
