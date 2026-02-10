@@ -41,7 +41,7 @@ EDIT_PROMPT = '''If and only if you have been explicitly instructed to make chan
 Rules:
 In REPLACE, X-Y indicate inclusive line numbers to replace;
 There can be multiple REPLACE sections for a single EDIT, with non-overlapping line ranges in any order;
-Plan your replacement ranges meticulously before beginning your answer, ensuring they are surgical and minimal, and don't contain mostly unchanged code;
+Plan your replacement ranges meticulously before beginning your answer, ensuring they are surgical and minimal, and don't contain blocks of unchanged code;
 Use the appropriate language for syntax highlighting in code fences;
 Remove code that is or will become dead;
 Use empty replacement text (and not comments) to delete code;
