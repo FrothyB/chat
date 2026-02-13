@@ -73,23 +73,24 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
         return sorted(set(results))[:max_results]
 
     terms_l = [t.lower() for t in terms]
-    results: List[str] = []
-    with contextlib.suppress(Exception):
-        for item in base.rglob('*'):
-            if len(results) >= max_results: break
-            if not item.is_file(): continue
-            rel = rel_of(item)
-            if not rel or not ok_common(item, rel): continue
-
-            rell, name = rel.lower(), item.name.lower()
-            if len(terms_l) == 1:
-                if terms_l[0] not in name: continue
-            else:
-                if not all(t in rell for t in terms_l): continue
-                if not any(t in name for t in terms_l): continue
-
-            results.append(rel)
-
+    def scan(strict_name: bool) -> List[str]:
+        results: List[str] = []
+        with contextlib.suppress(Exception):
+            for item in base.rglob('*'):
+                if len(results) >= max_results: break
+                if not item.is_file(): continue
+                rel = rel_of(item)
+                if not rel or not ok_common(item, rel): continue
+                rell, name = rel.lower(), item.name.lower()
+                if len(terms_l) == 1:
+                    t = terms_l[0]
+                    if t not in name and t not in rell: continue
+                else:
+                    if not all(t in rell for t in terms_l): continue
+                    if strict_name and not any(t in name for t in terms_l): continue
+                results.append(rel)
+        return results
+    results = scan(strict_name=True) or (scan(strict_name=False) if len(terms_l) > 1 else [])
     return sorted(set(results))[:max_results]
 
 def _with_line_tokens(text: str, every: int = LINE_NUMBER_EVERY) -> str:

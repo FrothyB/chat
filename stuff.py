@@ -38,15 +38,17 @@ EDIT_PROMPT = '''If and only if you have been explicitly instructed to make chan
 <Detailed explanation of file-level changes>
 
 ####REPLACE X-Y
-<code fence>
+<Abbreviated/partial mention of start-end line contents>
+<replacement code fence>
 
 Rules:
 REPLACE X-Y is inclusive;
+You must briefly mention start-end line contents before the replacement fence;
 There can be multiple REPLACE per EDIT, with non-overlapping line ranges in any order;
 Plan your replacement ranges meticulously before beginning your answer, ensuring they are surgical and minimal, and don't contain blocks of unchanged code;
 Use the appropriate language for syntax highlighting in code fences;
 Remove code that is or will become dead;
-Use empty replacement text (and not comments) to delete code;
+Use an empty replacement fence (and not comments) to delete code;
 File paths are relative to a base directory, you must specify them in full;
 Using only EDIT (without other headings) will perform a full file replacement or creation;
 When creating new files, identify a suitable location, typically in the same directory as related files.
