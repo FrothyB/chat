@@ -15,10 +15,10 @@ DEFAULT_REASONING = "medium"
 MODELS = ["google/gemini-3-flash-preview", "openai/gpt-5.2", "openai/gpt-5.2-pro", "anthropic/claude-4.6-opus", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
-FILE_LIKE_EXTS = {".py",".pyw",".ipynb",".js",".mjs",".cjs",".ts",".tsx",".c",".cc",".cpp",".cxx",".h",".hpp",".hh",".hxx",".go",".rs",".cs",".java",".html",".htm",".css",".md",".markdown",".txt",".rst",".json",".yaml",".yml",".toml",".sql",".sh",".bash",".zsh",".bat",".ps1"}
+FILE_LIKE_EXTS = {".py", ".pyw", ".ipynb", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".go", ".rs", ".cs", ".java", ".html", ".htm", ".css", ".md", ".markdown", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml", ".sql", ".sh", ".bash", ".zsh", ".bat", ".ps1"}
 
-# Every N lines, prefix that line with "<line_no>" when attaching file contents.
 LINE_NUMBER_EVERY = 1
+
 
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 20) -> List[str]:
     if not query or len(query) < 2: return []
@@ -28,40 +28,37 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
         try: return p.relative_to(base).as_posix()
         except Exception: return None
 
-    q = (query or '').strip().replace('\\', '/')
+    q = (query or "").strip().replace("\\", "/")
     if not q: return []
-
-    toks = [t for t in re.split(r'\s+', q) if t]
+    toks = [t for t in re.split(r"\s+", q) if t]
     if not toks: return []
 
     def to_regex(pat: str) -> re.Pattern:
         buf = []
         for ch in pat:
-            if ch == '*': buf.append('.*')
-            elif ch == '?': buf.append('.')
+            if ch == "*": buf.append(".*")
+            elif ch == "?": buf.append(".")
             else: buf.append(re.escape(ch))
-        return re.compile('^' + ''.join(buf) + '$', re.IGNORECASE)
+        return re.compile("^" + "".join(buf) + "$", re.IGNORECASE)
 
     patterns, terms = [], []
-    for t in toks:
-        (patterns if any(ch in t for ch in ('*', '?')) else terms).append(t)
+    for t in toks: (patterns if any(ch in t for ch in ("*", "?")) else terms).append(t)
 
     def ok_common(item: Path, rel: str) -> bool:
-        return not any(p.startswith('.') for p in Path(rel).parts) and item.suffix.lower() in FILE_LIKE_EXTS
+        return not any(p.startswith(".") for p in Path(rel).parts) and item.suffix.lower() in FILE_LIKE_EXTS
 
     if patterns:
         pats = []
         for pat in patterns:
-            pat = os.path.expanduser(pat) if pat.startswith('~') else pat
-            if pat.startswith('/'):
+            pat = os.path.expanduser(pat) if pat.startswith("~") else pat
+            if pat.startswith("/"):
                 try: pat = Path(pat).resolve().relative_to(base).as_posix()
                 except Exception: return []
-            pats.append((to_regex(pat), '/' not in pat))  # (rx, match_basename)
-
+            pats.append((to_regex(pat), "/" not in pat))
         tset = [t.lower() for t in terms]
         results: List[str] = []
         with contextlib.suppress(Exception):
-            for item in base.rglob('*'):
+            for item in base.rglob("*"):
                 if len(results) >= max_results: break
                 if not item.is_file(): continue
                 rel = rel_of(item)
@@ -73,10 +70,11 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
         return sorted(set(results))[:max_results]
 
     terms_l = [t.lower() for t in terms]
+
     def scan(strict_name: bool) -> List[str]:
         results: List[str] = []
         with contextlib.suppress(Exception):
-            for item in base.rglob('*'):
+            for item in base.rglob("*"):
                 if len(results) >= max_results: break
                 if not item.is_file(): continue
                 rel = rel_of(item)
@@ -90,92 +88,91 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
                     if strict_name and not any(t in name for t in terms_l): continue
                 results.append(rel)
         return results
+
     results = scan(strict_name=True) or (scan(strict_name=False) if len(terms_l) > 1 else [])
     return sorted(set(results))[:max_results]
 
+
 def _with_line_tokens(text: str, every: int = LINE_NUMBER_EVERY) -> str:
-    if not text or every <= 0: return text or ''
-    ls = (text or '').splitlines(True)
-    for i in range(every - 1, len(ls), every):
-        ls[i] = f"{i + 1}{ls[i]}"
-    return ''.join(ls)
+    if not text or every <= 0: return text or ""
+    ls = (text or "").splitlines(True)
+    for i in range(every - 1, len(ls), every): ls[i] = f"{i + 1} {ls[i]}"
+    return "".join(ls)
+
 
 def read_files(file_paths: List[str]) -> str:
     if not file_paths: return ""
     out: List[str] = []
-
     for rel in file_paths:
-        r = Path((rel or '').strip().replace('\\', '/'))
+        r = Path((rel or "").strip().replace("\\", "/"))
         name = r.as_posix()
-        if not name or r.is_absolute():
-            out.append(f"### {name or rel}\nError: invalid relative path\n"); continue
-
+        if not name or r.is_absolute(): out.append(f"### {name or rel}\nError: invalid relative path\n"); continue
         p = (BASE_DIR / r).resolve()
-        if not p.is_relative_to(BASE_DIR):
-            out.append(f"### {name}\nError: path escapes base dir\n"); continue
-
+        if not p.is_relative_to(BASE_DIR): out.append(f"### {name}\nError: path escapes base dir\n"); continue
         try:
             if p.name.endswith(".ipynb"):
-                raw = p.read_text(encoding='utf-8')
-                nb = json.loads(raw)
+                nb = json.loads(p.read_text(encoding="utf-8"))
                 cells = []
                 for cell in nb.get("cells", []):
                     if cell.get("cell_type") != "code": continue
                     src = cell.get("source", [])
                     if isinstance(src, str): src = [src]
                     if not isinstance(src, list): continue
-                    src = [s if isinstance(s, str) else str(s) for s in src]
-                    cells.append({"source": src})
+                    cells.append({"source": [s if isinstance(s, str) else str(s) for s in src]})
                 payload = json.dumps({"cells": cells}, indent=2) + "\n"
                 out.append(f"### {name}\nExtracted only source from notebook; edit cell-by-cell if needed.\n{_with_line_tokens(payload)}\n")
             else:
                 out.append(f"### {name}\n{_with_line_tokens(p.read_text(encoding='utf-8'))}\n")
         except Exception as e:
             out.append(f"### {name}\nError: {e}\n")
+    return "\n".join(out)
 
-    return '\n'.join(out)
 
-@dataclass
+@dataclass(slots=True)
 class EditEvent:
     kind: str
     filename: str
-    details: str = ''
+    details: str = ""
     path: Optional[str] = None
 
-@dataclass
+
+@dataclass(slots=True)
 class ReasoningEvent:
-    kind: str = 'reasoning'
-    text: str = ''
+    kind: str = "reasoning"
+    text: str = ""
 
-@dataclass
+
+@dataclass(slots=True)
 class ReplaceBlock:
-    start: int
-    end: int
+    x: str
+    lx: int
+    y: str
+    ly: int
     new: str
-    old: str = ''
-    lang: str = ''
+    lang: str = ""
 
-@dataclass
+
+@dataclass(slots=True)
 class EditDirective:
     kind: str
     filename: str
-    explanation: str = ''
+    explanation: str = ""
     replaces: List[ReplaceBlock] = field(default_factory=list)
 
+
 class ChatClient:
-    _EDIT_TRIGGER_RE = re.compile(r'\b(?:edit|rewrite)\b')
+    _EDIT_TRIGGER_RE = re.compile(r"\b(?:edit|rewrite)\b", re.IGNORECASE)
 
-    # New edit schema (breaking):
-    #   "###EDIT path/to/file"
-    #   "###PLAN ..." (ignored)
-    #   "###REPLACE X-Y" followed by a fenced block containing the new text.
-    _EDIT_HDR_RE = re.compile(r'(?m)^\s*###EDIT[ \t]+(.+?)\s*$')
-    _PLAN_HDR_RE = re.compile(r'(?m)^\s*####PLANNING\b.*$')
-    _REPLACE_HDR_RE = re.compile(r'(?m)^\s*####REPLACE[ \t]+(\d+)(?:[ \t]*-[ \t]*(\d+))?\s*$')
-    _CODE_FENCE_RE = re.compile(r'```[ \t]*([^\n]*)\n(.*?)```', re.DOTALL)
+    _EDIT_HDR_RE = re.compile(r"(?mi)^\s*###\s*edit\s+(.+?)\s*$")
+    _REPLACE_HDR_RE = re.compile(r"(?mi)^\s*####\s*replace\s+`([^\n`]*)`(?:\s*-\s*`([^\n`]*)`\s+lines\s+(\d+)\s*-\s*(\d+)|\s+line\s+(\d+))\s*$")
+    _CODE_FENCE_RE = re.compile(r"```[ \t]*([^\n]*)\n(.*?)```", re.DOTALL)
+    _FENCE_OPEN_LINE_RE = re.compile(r"(?m)^\s*```[ \t]*([^\n]*)\s*$")
+    _FENCE_ANY_LINE_RE = re.compile(r"(?m)^\s*```")
 
-    _FENCE_OPEN_LINE_RE = re.compile(r'(?m)^\s*```[ \t]*([^\n]*)\s*$')
-    _FENCE_ANY_LINE_RE = re.compile(r'(?m)^\s*```')
+    @staticmethod
+    def _blk_from_replace_match(m: re.Match) -> ReplaceBlock:
+        x, l = (m.group(1) or ""), m.group(5)
+        return ReplaceBlock(x=x, y=x, lx=int(l), ly=int(l), new="", lang="") if l else ReplaceBlock(x=x, y=(m.group(2) or ""), lx=int(m.group(3)), ly=int(m.group(4)), new="", lang="")
 
     def __init__(self):
         self.messages = [{"role": "system", "content": ""}]
@@ -185,51 +182,46 @@ class ChatClient:
         self.message_files: Dict[int, List[str]] = {}
         self.edited_files: Dict[str, bool] = {}
         self.edit_transactions: List[Dict] = []
-
         self._last_assistant_index: Optional[int] = None
         self._display_overrides: Dict[int, str] = {}
         self._file_cache: Dict[str, Tuple[int, int, List[str]]] = {}
-
         self.client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=7200, max_retries=20)
 
-    def get_completion(self, data):
-        return self.client.chat.completions.create(**data)
+    def get_completion(self, data): return self.client.chat.completions.create(**data)
 
     @staticmethod
-    def _norm_newlines(s: str) -> str:
-        return (s or '').replace('\r\n', '\n').replace('\r', '\n')
+    def _norm_newlines(s: str) -> str: return (s or "").replace("\r\n", "\n").replace("\r", "\n")
+
+    @staticmethod
+    def _strip_line_token(s: str) -> str: return re.sub(r"^\s*\d+(?:\s+|:\s*|>\s*|-?\s*)", "", (s or ""), count=1)
+
+    @staticmethod
+    def _canon_line(s: str) -> str: return (s or "").strip()
 
     def _strip_injected_prompts(self, s: str) -> str:
-        s = s or ''
+        s = s or ""
         if s.startswith(CHAT_PROMPT): s = s[len(CHAT_PROMPT):]
         if s.startswith(EDIT_PROMPT): s = s[len(EDIT_PROMPT):]
-        return s.lstrip('\n')
+        return s.lstrip("\n")
 
     def _recompute_prompt_flags(self) -> None:
         chat, edit = False, False
         for m in self.messages:
-            if m.get('role') != 'user': continue
-            c = m.get('content') or ''
+            if m.get("role") != "user": continue
+            c = m.get("content") or ""
             if c.startswith(CHAT_PROMPT): chat = True
             if c.startswith(EDIT_PROMPT) or c.startswith(CHAT_PROMPT + EDIT_PROMPT): edit = True
             if chat and edit: break
         self._chat_prompt_injected, self._edit_prompt_injected = chat, edit
 
-    async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = "minimal", force_edit: bool = False
-                            ) -> AsyncGenerator[Union[str, ReasoningEvent], None]:
+    async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = DEFAULT_REASONING, force_edit: bool = False) -> AsyncGenerator[Union[str, ReasoningEvent], None]:
         msg_index = len(self.messages)
         if self.files: self.message_files[msg_index] = self.files.copy()
 
-        prefix = ''
-        if not self._chat_prompt_injected:
-            prefix += CHAT_PROMPT
-            self._chat_prompt_injected = True
-
-        want_edit = force_edit or bool(self._EDIT_TRIGGER_RE.search((user_msg or '').lower()))
-        if want_edit and not self._edit_prompt_injected:
-            prefix += EDIT_PROMPT
-            self._edit_prompt_injected = True
-
+        prefix = ""
+        if not self._chat_prompt_injected: prefix, self._chat_prompt_injected = prefix + CHAT_PROMPT, True
+        want_edit = force_edit or bool(self._EDIT_TRIGGER_RE.search((user_msg or "").lower()))
+        if want_edit and not self._edit_prompt_injected: prefix, self._edit_prompt_injected = prefix + EDIT_PROMPT, True
         if prefix: user_msg = f"{prefix}\n\n{user_msg}"
 
         content = user_msg + (f"\n\nAttached files:\n{read_files(self.files)}" if self.files else "")
@@ -241,7 +233,7 @@ class ChatClient:
         self.messages.append({"role": "assistant", "content": ""})
 
         data = {"model": model, "messages": self.messages[:-1], "max_tokens": 50000, "temperature": 0.2, "stream": True, "reasoning_effort": reasoning}
-        full_response = ""
+        full = ""
         try:
             stream = await self.get_completion(data)
             async for chunk in stream:
@@ -251,49 +243,62 @@ class ChatClient:
                     delta = getattr(choice, "delta", None) or {}
                     text = getattr(delta, "content", None)
                     if text:
-                        full_response += text
-                        self.messages[assistant_index]["content"] = full_response
+                        full += text
+                        self.messages[assistant_index]["content"] = full
                         yield text
                     r = getattr(delta, "reasoning", None)
                     reason = r.get("content") if isinstance(r, dict) else (r if isinstance(r, str) else None)
-                    if reason:
-                        yield ReasoningEvent(text=reason)
+                    if reason: yield ReasoningEvent(text=reason)
                 except Exception:
                     continue
-            self.messages[assistant_index]["content"] = full_response
+            self.messages[assistant_index]["content"] = full
         except (asyncio.CancelledError, GeneratorExit):
             raise
 
-    # --- Display-only expansion: inject file text + "WITH" after "###REPLACE a-b" ---
     def _get_file_lines_cached(self, rel: str) -> Optional[List[str]]:
         try:
-            rp = Path((rel or '').strip().replace('\\', '/'))
+            rp = Path((rel or "").strip().replace("\\", "/"))
             if not rel or rp.is_absolute(): return None
             p = (BASE_DIR / rp).resolve()
             if not p.is_relative_to(BASE_DIR) or not p.exists(): return None
-
             st = p.stat()
-            mtime_ns = getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9))
+            mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
             cached = self._file_cache.get(rel)
-            if cached and cached[0] == mtime_ns and cached[1] == st.st_size:
-                return cached[2]
-
-            norm = self._norm_newlines(p.read_text(encoding='utf-8'))
-            lines = norm.split('\n')
-            if norm.endswith('\n'): lines = lines[:-1]
+            if cached and cached[0] == mtime_ns and cached[1] == st.st_size: return cached[2]
+            norm = self._norm_newlines(p.read_text(encoding="utf-8"))
+            lines = norm.split("\n")
+            if norm.endswith("\n"): lines = lines[:-1]
             self._file_cache[rel] = (mtime_ns, st.st_size, lines)
             return lines
         except Exception:
             return None
 
-    def render_for_display(self, md: str) -> str:
-        md = md or ''
-        if '###REPLACE' not in md: return md
+    @staticmethod
+    def _find_near(lines: List[str], center_1: int, target: str, tol: int = 2) -> Optional[int]:
+        n = len(lines)
+        if n <= 0: return None
+        c, t = max(1, min(center_1, n)), ChatClient._canon_line(target)
+        for o in [0] + [x for d in range(1, tol + 1) for x in (-d, d)]:
+            i = c + o
+            if 1 <= i <= n and ChatClient._canon_line(lines[i - 1]) == t: return i
+        return None
 
-        lines = md.split('\n')
-        out: List[str] = []
-        cur_edit_file: Optional[str] = None
-        pending: Optional[Dict[str, object]] = None  # {"hdr": str, "a": int, "b": int, "between": List[str]}
+    def _resolve_replace_range(self, file_lines: List[str], blk: ReplaceBlock, tol: int = 2) -> Optional[Tuple[int, int]]:
+        n = len(file_lines)
+        if n <= 0: return None
+        x, y = self._strip_line_token(blk.x), self._strip_line_token(blk.y)
+        a, b = self._find_near(file_lines, int(blk.lx), x, tol=tol), self._find_near(file_lines, int(blk.ly), y, tol=tol)
+        if a is None and n < int(blk.lx) <= n + 2: a = n
+        if b is None and n < int(blk.ly) <= n + 2: b = n
+        if a is None or b is None or a > b: return None
+        return a, b
+
+    def render_for_display(self, md: str) -> str:
+        md = md or ""
+        if "replace" not in md.lower(): return md
+
+        lines, out = md.split("\n"), []
+        cur_edit_file, pending = None, None  # {"hdr": str, "blk": ReplaceBlock, "between": List[str]}
 
         def flush_pending() -> None:
             nonlocal pending
@@ -302,63 +307,58 @@ class ChatClient:
             out += (pending["between"] or [])  # type: ignore[operator]
             pending = None
 
+        def parse_hdr(line: str) -> Optional[ReplaceBlock]:
+            m = self._REPLACE_HDR_RE.match(line)
+            return self._blk_from_replace_match(m) if m else None
+
         for line in lines:
-            medit = self._EDIT_HDR_RE.match(line)
-            if medit:
+            if medit := self._EDIT_HDR_RE.match(line):
                 flush_pending()
-                cur_edit_file = (medit.group(1) or '').strip().replace('`', '')
+                cur_edit_file = (medit.group(1) or "").strip().replace("`", "")
                 out.append(line)
                 continue
 
-            if self._EDIT_HDR_RE.match(line) and not medit:
-                flush_pending()
-                cur_edit_file = None
-                out.append(line)
-                continue
+            if not cur_edit_file: out.append(line); continue
 
-            if cur_edit_file and pending:
-                mfence = self._FENCE_OPEN_LINE_RE.match(line)
-                if mfence:
-                    lang = (mfence.group(1) or '').strip()
-                    a, b = int(pending["a"]), int(pending["b"])  # type: ignore[arg-type]
+            if pending:
+                if mfence := self._FENCE_OPEN_LINE_RE.match(line):
+                    lang = (mfence.group(1) or "").strip()
                     path = self._resolve_path(cur_edit_file, create_if_missing=False)
                     file_lines = self._get_file_lines_cached(path) if path else None
                     between = pending["between"] or []  # type: ignore[assignment]
-                    should_inject = bool(lang and file_lines and (1 <= a <= b <= len(file_lines)) and not any(self._FENCE_ANY_LINE_RE.match(x) for x in between))
-                    out.append(pending["hdr"])  # type: ignore[index]
+                    blk: ReplaceBlock = pending["blk"]  # type: ignore[assignment]
+                    a, b = (None, None)
+                    if file_lines:
+                        r = self._resolve_replace_range(file_lines, blk, tol=2)
+                        if r: a, b = r
+                    should_inject = bool(lang and file_lines and a and b and (1 <= a <= b <= len(file_lines)) and not any(self._FENCE_ANY_LINE_RE.match(x) for x in between))
+                    out.append(f"####REPLACE {int(a) if a else blk.lx}-{int(b) if b else blk.ly}")
                     out += between
-                    if should_inject:
-                        out += [f"```{lang}".rstrip(), '\n'.join(file_lines[a - 1:b]), "```", "####WITH"]
+                    if should_inject: out += [f"```{lang}".rstrip(), "\n".join(file_lines[a - 1:b]), "```", "####WITH"]  # type: ignore[operator]
                     pending = None
                     out.append(line)
                     continue
 
-                mrep2 = self._REPLACE_HDR_RE.match(line)
-                if mrep2:
+                if blk2 := parse_hdr(line):
                     flush_pending()
-                    pending = {"hdr": line, "a": int(mrep2.group(1)), "b": int(mrep2.group(2) or mrep2.group(1)), "between": []}
+                    pending = {"hdr": f"####REPLACE {blk2.lx}-{blk2.ly}", "blk": blk2, "between": []}
                     continue
 
                 pending["between"].append(line)  # type: ignore[index]
                 continue
 
-            if cur_edit_file:
-                mrep = self._REPLACE_HDR_RE.match(line)
-                if mrep:
-                    flush_pending()
-                    pending = {"hdr": line, "a": int(mrep.group(1)), "b": int(mrep.group(2) or mrep.group(1)), "between": []}
-                    continue
+            if blk := parse_hdr(line):
+                pending = {"hdr": f"####REPLACE {blk.lx}-{blk.ly}", "blk": blk, "between": []}
+                continue
 
             out.append(line)
 
         flush_pending()
-        return '\n'.join(out)
+        return "\n".join(out)
 
     def set_last_assistant_display(self, display_md: str) -> None:
-        if self._last_assistant_index is not None:
-            self._display_overrides[self._last_assistant_index] = display_md or ''
+        if self._last_assistant_index is not None: self._display_overrides[self._last_assistant_index] = display_md or ""
 
-    # --- Edit parsing + applying (line ranges only) ---
     def parse_edit_markdown(self, md: str) -> List[EditDirective]:
         if not md: return []
         text = self._norm_newlines(md)
@@ -366,7 +366,7 @@ class ChatClient:
         out: List[EditDirective] = []
 
         for i, m in enumerate(matches):
-            filename = (m.group(1) or '').strip().replace('`', '')
+            filename = (m.group(1) or "").strip().replace("`", "")
             start = m.end()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
             section = text[start:end].strip()
@@ -378,34 +378,38 @@ class ChatClient:
                 if not r: break
                 mnew = self._CODE_FENCE_RE.search(section, r.end())
                 if not mnew: break
-                a, b = int(r.group(1)), int(r.group(2) or r.group(1))
-                replaces.append(ReplaceBlock(start=a, end=b, new=mnew.group(2), lang=(mnew.group(1) or '').strip()))
+                blk = self._blk_from_replace_match(r)
+                replaces.append(ReplaceBlock(x=blk.x, y=blk.y, lx=blk.lx, ly=blk.ly, new=mnew.group(2), lang=(mnew.group(1) or "").strip()))
                 pos = mnew.end()
 
             if not replaces:
                 fences = list(self._CODE_FENCE_RE.finditer(section))
                 if len(fences) == 1:
                     f = fences[0]
-                    replaces = [ReplaceBlock(start=0, end=0, new=f.group(2), lang=(f.group(1) or '').strip())]
+                    replaces = []
 
             expl_cut = min([x.start() for x in (self._REPLACE_HDR_RE.search(section), self._CODE_FENCE_RE.search(section)) if x], default=None)
             expl = section[:expl_cut].strip() if expl_cut is not None else section.strip()
-            out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces))
+
+            if replaces:
+                out.append(EditDirective(kind="EDIT", filename=filename, explanation=expl, replaces=replaces))
+            else:
+                fences = list(self._CODE_FENCE_RE.finditer(section))
+                if len(fences) == 1:
+                    f = fences[0]
+                    out.append(EditDirective(kind="EDIT", filename=filename, explanation=expl, replaces=[ReplaceBlock(x="", lx=0, y="", ly=0, new=f.group(2), lang=(f.group(1) or "").strip())]))
 
         return out
 
     def _resolve_path(self, filename: str, create_if_missing: bool = False) -> Optional[str]:
-        raw = (filename or '').strip().replace('`', '').replace('\\', '/')
+        raw = (filename or "").strip().replace("`", "").replace("\\", "/")
         if not raw: return None
         cand = Path(raw)
         if cand.is_absolute(): return None
 
         def safe_rel(p: Path) -> Optional[Path]:
-            try:
-                rp = p.relative_to(BASE_DIR)
-                return Path(rp.as_posix())
-            except Exception:
-                return None
+            try: return Path(p.relative_to(BASE_DIR).as_posix())
+            except Exception: return None
 
         abs0 = (BASE_DIR / cand).resolve()
         rel0 = safe_rel(abs0)
@@ -443,7 +447,7 @@ class ChatClient:
 
     def _atomic_write(self, path: Path, content: str):
         path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=str(path.parent), delete=False) as tmp:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False) as tmp:
             tmp.write(content); tmp.flush()
             with contextlib.suppress(Exception): os.fsync(tmp.fileno())
             tmp_name = tmp.name
@@ -453,177 +457,161 @@ class ChatClient:
         directives = self.parse_edit_markdown(md)
         if not directives: return []
         results: List[EditEvent] = []
-        ai = (len(self.messages) - 1) if (self.messages and self.messages[-1]['role'] == 'assistant') else None
-        tx = {'assistant_index': ai, 'files': {}, 'changed': set()}
+        ai = (len(self.messages) - 1) if (self.messages and self.messages[-1]["role"] == "assistant") else None
+        tx = {"assistant_index": ai, "files": {}, "changed": set()}
 
-        def _abs(rel: str) -> Path:
-            return (BASE_DIR / Path(rel)).resolve()
+        def _abs(rel: str) -> Path: return (BASE_DIR / Path(rel)).resolve()
 
         def _remember_prev(rel: str):
-            if rel in tx['files']: return
+            if rel in tx["files"]: return
             p = _abs(rel)
-            tx['files'][rel] = p.read_text(encoding='utf-8') if p.exists() else None
+            tx["files"][rel] = p.read_text(encoding="utf-8") if p.exists() else None
 
         def _count_lines(s: str) -> int:
-            norm = self._norm_newlines(s or '')
-            ls = norm.split('\n')
-            if norm.endswith('\n'): ls = ls[:-1]
+            norm = self._norm_newlines(s or "")
+            ls = norm.split("\n")
+            if norm.endswith("\n"): ls = ls[:-1]
             return len(ls)
 
         for d in directives:
             try:
                 target = self._resolve_path(d.filename, create_if_missing=True)
-                if not target:
-                    results.append(EditEvent('error', Path(d.filename).name, 'Invalid path (must be relative to base dir)', d.filename)); continue
-
+                if not target: results.append(EditEvent("error", Path(d.filename).name, "Invalid path (must be relative to base dir)", d.filename)); continue
                 rel, p = target, _abs(target)
-                if not p.is_relative_to(BASE_DIR):
-                    results.append(EditEvent('error', Path(rel).name, 'Path escapes base dir', rel)); continue
+                if not p.is_relative_to(BASE_DIR): results.append(EditEvent("error", Path(rel).name, "Path escapes base dir", rel)); continue
 
                 is_new = not p.exists()
-                original = p.read_text(encoding='utf-8') if not is_new else ''
+                original = p.read_text(encoding="utf-8") if not is_new else ""
 
-                if not d.replaces:
-                    results.append(EditEvent('error', Path(rel).name, 'No edit blocks found', rel)); continue
+                if not d.replaces: results.append(EditEvent("error", Path(rel).name, "No edit blocks found", rel)); continue
 
-                full = [b for b in d.replaces if b.start == 0 and b.end == 0]
+                full = [b for b in d.replaces if b.lx == 0 and b.ly == 0]
                 if full:
-                    if len(full) != 1 or len(d.replaces) != 1:
-                        results.append(EditEvent('error', Path(rel).name, 'Full rewrites must contain exactly one fenced block', rel)); continue
-
+                    if len(full) != 1 or len(d.replaces) != 1: results.append(EditEvent("error", Path(rel).name, "Full rewrites must contain exactly one fenced block", rel)); continue
                     body = self._norm_newlines(full[0].new)
                     if is_new:
-                        norm2 = body.rstrip('\n')
-                        updated = norm2 + ('\n' if norm2 else '')
+                        norm2 = body.rstrip("\n")
+                        updated = norm2 + ("\n" if norm2 else "")
                     else:
-                        eol = '\r\n' if '\r\n' in original else '\n'
-                        had_final_nl = self._norm_newlines(original).endswith('\n')
-                        norm2 = body.rstrip('\n')
-                        updated = (norm2 + ('\n' if had_final_nl else '')).replace('\n', eol)
-
+                        eol = "\r\n" if "\r\n" in original else "\n"
+                        had_final_nl = self._norm_newlines(original).endswith("\n")
+                        norm2 = body.rstrip("\n")
+                        updated = (norm2 + ("\n" if had_final_nl else "")).replace("\n", eol)
                     _remember_prev(rel)
                     self._atomic_write(p, updated)
-                    tx['changed'].add(rel)
-                    results.append(EditEvent('complete', Path(rel).name, f"{'created' if is_new else 'rewritten'}: {_count_lines(original) if not is_new else 0} → {_count_lines(updated)} lines", rel))
+                    tx["changed"].add(rel)
+                    results.append(EditEvent("complete", Path(rel).name, f"{'created' if is_new else 'rewritten'}: {_count_lines(original) if not is_new else 0} → {_count_lines(updated)} lines", rel))
                     continue
 
-                if is_new:
-                    parts = [self._norm_newlines(b.new).rstrip('\n') for b in d.replaces]
-                    norm2 = '\n'.join(parts)
-                    updated = norm2 + ('\n' if norm2 else '')
-                    _remember_prev(rel)
-                    self._atomic_write(p, updated)
-                    tx['changed'].add(rel)
-                    results.append(EditEvent('complete', Path(rel).name, f"created: 0 → {_count_lines(updated)} lines", rel))
-                    continue
+                if is_new: results.append(EditEvent("error", Path(rel).name, "New files must be created via a full rewrite (single fenced block)", rel)); continue
 
-                eol = '\r\n' if '\r\n' in original else '\n'
+                eol = "\r\n" if "\r\n" in original else "\n"
                 norm = self._norm_newlines(original)
-                had_final_nl = norm.endswith('\n')
-                lines = norm.split('\n')
-                if had_final_nl: lines = lines[:-1]
+                had_final_nl = norm.endswith("\n")
+                orig_lines = norm.split("\n")
+                if had_final_nl: orig_lines = orig_lines[:-1]
 
-                n0 = len(lines)
+                resolved: List[Tuple[int, int, List[str]]] = []
                 missing: List[str] = []
-                replaced = 0
 
-                for blk in sorted(d.replaces, key=lambda b: (b.start, b.end), reverse=True):
-                    a, b = int(blk.start), int(blk.end)
-                    if not (1 <= a <= b <= len(lines)):
-                        missing.append(f"{a}-{b}"); continue
+                for blk in d.replaces:
+                    rng = self._resolve_replace_range(orig_lines, blk, tol=2)
+                    if not rng: missing.append(f"{blk.lx}-{blk.ly}"); continue
+                    a, b = rng
                     new_norm = self._norm_newlines(blk.new)
-                    new_lines = new_norm.split('\n')
-                    if new_norm.endswith('\n'): new_lines = new_lines[:-1]
-                    lines[a - 1:b] = new_lines
-                    replaced += 1
+                    new_lines = new_norm.split("\n")
+                    if new_norm.endswith("\n"): new_lines = new_lines[:-1]
+                    resolved.append((a, b, new_lines))
 
-                if missing:
-                    results.append(EditEvent('error', Path(rel).name, f"LINES range(s) invalid: {', '.join(missing)}", rel)); continue
+                if missing: results.append(EditEvent("error", Path(rel).name, f"Could not match anchor line(s) near: {', '.join(missing)}", rel)); continue
 
-                norm2 = '\n'.join(lines) + ('\n' if had_final_nl else '')
-                updated = norm2 if eol == '\n' else norm2.replace('\n', '\r\n')
-                if updated == original:
-                    results.append(EditEvent('error', Path(rel).name, 'No changes applied', rel)); continue
+                resolved.sort(key=lambda t: (t[0], t[1]))
+                for (a1, b1, _), (a2, b2, _) in zip(resolved, resolved[1:]):
+                    if a2 <= b1: raise RuntimeError(f"Overlapping replace ranges: {a1}-{b1} and {a2}-{b2}")
+
+                lines = orig_lines[:]
+                for a, b, new_lines in sorted(resolved, key=lambda t: (t[0], t[1]), reverse=True): lines[a - 1:b] = new_lines
+
+                norm2 = "\n".join(lines) + ("\n" if had_final_nl else "")
+                updated = norm2 if eol == "\n" else norm2.replace("\n", "\r\n")
+                if updated == original: results.append(EditEvent("error", Path(rel).name, "No changes applied", rel)); continue
 
                 _remember_prev(rel)
                 self._atomic_write(p, updated)
-                tx['changed'].add(rel)
-                results.append(EditEvent('complete', Path(rel).name, f"replaced {replaced} range(s): {n0} → {_count_lines(updated)} lines", rel))
+                tx["changed"].add(rel)
+                results.append(EditEvent("complete", Path(rel).name, f"replaced {len(resolved)} range(s): {len(orig_lines)} → {_count_lines(updated)} lines", rel))
             except Exception as e:
-                results.append(EditEvent('error', Path(d.filename).name, f'Error: {e}', d.filename))
+                results.append(EditEvent("error", Path(d.filename).name, f"Error: {e}", d.filename))
 
-        if tx['changed']:
-            tx['files'] = {p: tx['files'][p] for p in tx['changed']}
+        if tx["changed"]:
+            tx["files"] = {p: tx["files"][p] for p in tx["changed"]}
             self.edit_transactions.append(tx)
-            for p in tx['changed']: self.edited_files[p] = True
+            for p in tx["changed"]: self.edited_files[p] = True
         return results
 
     def rollback_file(self, file_path: str) -> bool:
-        rel = (file_path or '').strip().replace('\\', '/')
+        rel = (file_path or "").strip().replace("\\", "/")
         if not rel or Path(rel).is_absolute(): return False
         p = (BASE_DIR / Path(rel)).resolve()
         if not p.is_relative_to(BASE_DIR): return False
 
         for i in range(len(self.edit_transactions) - 1, -1, -1):
             tx = self.edit_transactions[i]
-            changed: Set[str] = tx.get('changed', set())
+            changed: Set[str] = tx.get("changed", set())
             if rel not in changed: continue
-            prev = tx['files'].get(rel, None)
+            prev = tx["files"].get(rel, None)
             try:
                 if prev is None:
                     with contextlib.suppress(FileNotFoundError): p.unlink()
                 else:
-                    p.write_text(prev, encoding='utf-8')
+                    self._atomic_write(p, prev)
             except Exception:
                 return False
 
             changed.remove(rel)
-            tx['files'].pop(rel, None)
-            if not changed:
-                self.edit_transactions.pop(i)
+            tx["files"].pop(rel, None)
+            if not changed: self.edit_transactions.pop(i)
 
             current = {}
             for t in self.edit_transactions:
-                for path in t.get('changed', set()): current[path] = True
+                for path in t.get("changed", set()): current[path] = True
             self.edited_files = current
             return True
 
         return False
 
     def rollback_edits_for_assistant(self, assistant_index: int):
-        while self.edit_transactions and self.edit_transactions[-1].get('assistant_index') == assistant_index:
+        while self.edit_transactions and self.edit_transactions[-1].get("assistant_index") == assistant_index:
             tx = self.edit_transactions.pop()
-            for rel in list(tx.get('changed', set())):
-                prev = tx['files'].get(rel, None)
+            for rel in list(tx.get("changed", set())):
+                prev = tx["files"].get(rel, None)
                 p = (BASE_DIR / Path(rel)).resolve()
                 if not p.is_relative_to(BASE_DIR): continue
                 with contextlib.suppress(Exception):
                     if prev is None:
                         with contextlib.suppress(FileNotFoundError): p.unlink()
                     else:
-                        p.write_text(prev, encoding='utf-8')
+                        self._atomic_write(p, prev)
 
         current = {}
         for t in self.edit_transactions:
-            for path in t.get('changed', set()): current[path] = True
+            for path in t.get("changed", set()): current[path] = True
         self.edited_files = current
 
     def undo_last(self) -> Tuple[Optional[str], List[str]]:
-        if len(self.messages) < 3 or self.messages[-1]['role'] != 'assistant':
-            return None, []
+        if len(self.messages) < 3 or self.messages[-1]["role"] != "assistant": return None, []
         ai = len(self.messages) - 1
         self.rollback_edits_for_assistant(ai)
         self._display_overrides.pop(ai, None)
         self.messages.pop()
 
         for i in range(len(self.messages) - 1, -1, -1):
-            if self.messages[i]['role'] == 'user':
-                content = self.messages.pop(i)['content']
+            if self.messages[i]["role"] == "user":
+                content = self.messages.pop(i)["content"]
                 files = self.message_files.pop(i, [])
                 self.files = files.copy()
-                user_msg = content.split('\n\nAttached files:')[0] if '\n\nAttached files:' in content else content
-                if EXTRACT_ADD_ON in user_msg:
-                    user_msg = user_msg.split(EXTRACT_ADD_ON, 1)[0].rstrip()
+                user_msg = content.split("\n\nAttached files:")[0] if "\n\nAttached files:" in content else content
+                if EXTRACT_ADD_ON in user_msg: user_msg = user_msg.split(EXTRACT_ADD_ON, 1)[0].rstrip()
                 user_msg = self._strip_injected_prompts(user_msg)
                 self._recompute_prompt_flags()
                 return user_msg, files
@@ -634,16 +622,15 @@ class ChatClient:
     def get_display_messages(self) -> List[Tuple[str, str]]:
         out = []
         for idx, m in enumerate(self.messages[1:], start=1):
-            role, content = m.get('role'), m.get('content') or ''
-            if role == 'user':
-                content = content.split('\n\nAttached files:')[0] if '\n\nAttached files:' in content else content
+            role, content = m.get("role"), m.get("content") or ""
+            if role == "user":
+                content = content.split("\n\nAttached files:")[0] if "\n\nAttached files:" in content else content
                 content = self._strip_injected_prompts(content)
-            elif role == 'assistant':
+            elif role == "assistant":
                 content = self._display_overrides.get(idx, content)
             out.append((role, content))
         return out
 
     def ensure_last_assistant_nonempty(self, fallback: str = "Response stopped."):
         with contextlib.suppress(Exception):
-            if self.messages and self.messages[-1]["role"] == "assistant" and not (self.messages[-1].get("content") or "").strip():
-                self.messages[-1]["content"] = fallback
+            if self.messages and self.messages[-1]["role"] == "assistant" and not (self.messages[-1].get("content") or "").strip(): self.messages[-1]["content"] = fallback
