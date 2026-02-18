@@ -29,11 +29,11 @@ Markdown tables and mermaid diagrams when appropriate, with quotes for mermaid l
 
 Finally, as you prepare your answer, ensure that it adheres to all the instructions and guidelines above.'''
 
-EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections exactly as follows, filling in all placeholders;
+EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections exactly as follows, filling in all placeholders:
 
 ### Edit <filepath>
 <Detailed overview of file-level changes>
-<Methodical list of which parts of the file you will be changing and how>
+<Methodical list of which parts of the file you will be changing and how, a blueprint for the commands to follow>
 
 #### <command> `X`-`Y`
 <replacement fence>
@@ -45,17 +45,17 @@ Rules:
 The command can be "Replace", "Insert Before" or "Insert After";
 Place full original line contents into X and Y;
 X-Y specifies a range, X alone a single line;
-Ensure X is always unique (Y is easier to match, and ok if not unique);
+Ensure X is always unique (Y is easier to match);
 There can be multiple commands per Edit with non-overlapping line ranges in any order;
 Replacement ranges should be surgical, minimal, and devoid of unchanged code blocks;
-Ensure that new code slots in correctly, paying attention to start-end lines and intentation;
+Ensure that new code slots in correctly, paying attention to start-end lines and indentation;
 Remove dead code;
 Use an empty replacement fence to delete code;
 File paths are relative to a base directory, specify them in full;
 Using only Edit will perform a full file replacement or creation;
 Identify a suitable location for new files, typically in the same directory as related files.
 
-Before beginning your answer, plan each and every command and its type meticulously to adhere to all the above rules.
+Before beginning your answer, plan commands and their types thoroughly to adhere to all the above rules.
 You may create new files to implement new functionality or to refactor existing code.
 Remember that earlier modifications will now be part of the file.'''
 
