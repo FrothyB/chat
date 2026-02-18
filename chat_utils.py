@@ -16,9 +16,7 @@ MODELS = ["google/gemini-3-flash-preview", "openai/gpt-5.2", "openai/gpt-5.2-pro
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 FILE_LIKE_EXTS = {".py", ".pyw", ".ipynb", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".go", ".rs", ".cs", ".java", ".html", ".htm", ".css", ".md", ".markdown", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml", ".sql", ".sh", ".bash", ".zsh", ".bat", ".ps1"}
-
-LINE_NUMBER_EVERY = 1
-
+REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS = 2
 
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 20) -> List[str]:
     if not query or len(query) < 2: return []
@@ -93,13 +91,6 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
     return sorted(set(results))[:max_results]
 
 
-def _with_line_tokens(text: str, every: int = LINE_NUMBER_EVERY) -> str:
-    if not text or every <= 0: return text or ""
-    ls = (text or "").splitlines(True)
-    for i in range(every - 1, len(ls), every): ls[i] = f"{i + 1} {ls[i]}"
-    return "".join(ls)
-
-
 def read_files(file_paths: List[str]) -> str:
     if not file_paths: return ""
     out: List[str] = []
@@ -120,9 +111,9 @@ def read_files(file_paths: List[str]) -> str:
                     if not isinstance(src, list): continue
                     cells.append({"source": [s if isinstance(s, str) else str(s) for s in src]})
                 payload = json.dumps({"cells": cells}, indent=2) + "\n"
-                out.append(f"### {name}\nExtracted only source from notebook; edit cell-by-cell if needed.\n{_with_line_tokens(payload)}\n")
+                out.append(f"### {name}\nExtracted only source from notebook; edit cell-by-cell if needed.\n{payload}\n")
             else:
-                out.append(f"### {name}\n{_with_line_tokens(p.read_text(encoding='utf-8'))}\n")
+                out.append(f"### {name}\n{p.read_text(encoding='utf-8')}\n")
         except Exception as e:
             out.append(f"### {name}\nError: {e}\n")
     return "\n".join(out)
@@ -145,16 +136,15 @@ class ReasoningEvent:
 @dataclass(slots=True)
 class ReplaceBlock:
     x: str
-    lx: int
     y: str
-    ly: int
-    new: str
+    single: bool = False
+    new: str = ""
     lang: str = ""
-
+    op: str = "replace"  # "replace" | "insert_after" | "insert_before"
 
 @dataclass(slots=True)
 class EditDirective:
-    kind: str
+    kind: str  # "EDIT"
     filename: str
     explanation: str = ""
     replaces: List[ReplaceBlock] = field(default_factory=list)
@@ -162,17 +152,13 @@ class EditDirective:
 
 class ChatClient:
     _EDIT_TRIGGER_RE = re.compile(r"\b(?:edit|rewrite)\b", re.IGNORECASE)
-
     _EDIT_HDR_RE = re.compile(r"(?mi)^\s*###\s*edit\s+(.+?)\s*$")
-    _REPLACE_HDR_RE = re.compile(r"(?mi)^\s*####\s*replace\s+`([^\n`]*)`(?:\s*-\s*`([^\n`]*)`\s+lines\s+(\d+)\s*-\s*(\d+)|\s+line\s+(\d+))\s*$")
-    _CODE_FENCE_RE = re.compile(r"```[ \t]*([^\n]*)\n(.*?)```", re.DOTALL)
-    _FENCE_OPEN_LINE_RE = re.compile(r"(?m)^\s*```[ \t]*([^\n]*)\s*$")
+    _REPLACE_HDR_RE = re.compile(r"(?mi)^\s*####\s*replace\s+`([^\n`]*)`(?:\s*-\s*`([^\n`]*)`)?\s*$")
+    _INSERT_AFTER_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+after\s+`([^\n`]*)`(?:\s*-\s*`([^\n`]*)`)?\s*$")
+    _INSERT_BEFORE_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+before\s+`([^\n`]*)`(?:\s*-\s*`([^\n`]*)`)?\s*$")
+    _FENCE_OPEN_RE = re.compile(r"(?m)^\s*```[ \t]*([^\n`]*)\s*$")
+    _FENCE_CLOSE_RE = re.compile(r"(?m)^\s*```\s*$")
     _FENCE_ANY_LINE_RE = re.compile(r"(?m)^\s*```")
-
-    @staticmethod
-    def _blk_from_replace_match(m: re.Match) -> ReplaceBlock:
-        x, l = (m.group(1) or ""), m.group(5)
-        return ReplaceBlock(x=x, y=x, lx=int(l), ly=int(l), new="", lang="") if l else ReplaceBlock(x=x, y=(m.group(2) or ""), lx=int(m.group(3)), ly=int(m.group(4)), new="", lang="")
 
     def __init__(self):
         self.messages = [{"role": "system", "content": ""}]
@@ -191,9 +177,6 @@ class ChatClient:
 
     @staticmethod
     def _norm_newlines(s: str) -> str: return (s or "").replace("\r\n", "\n").replace("\r", "\n")
-
-    @staticmethod
-    def _strip_line_token(s: str) -> str: return re.sub(r"^\s*\d+(?:\s+|:\s*|>\s*|-?\s*)", "", (s or ""), count=1)
 
     @staticmethod
     def _canon_line(s: str) -> str: return (s or "").strip()
@@ -274,87 +257,145 @@ class ChatClient:
             return None
 
     @staticmethod
-    def _find_near(lines: List[str], center_1: int, target: str, tol: int = 2) -> Optional[int]:
-        n = len(lines)
-        if n <= 0: return None
-        c, t = max(1, min(center_1, n)), ChatClient._canon_line(target)
-        for o in [0] + [x for d in range(1, tol + 1) for x in (-d, d)]:
-            i = c + o
-            if 1 <= i <= n and ChatClient._canon_line(lines[i - 1]) == t: return i
-        return None
+    def _parse_fence_from(text: str, pos: int) -> Optional[Tuple[str, str, int]]:
+        m = ChatClient._FENCE_OPEN_RE.search(text, pos)
+        if not m: return None
+        lang, body_start = (m.group(1) or "").strip(), m.end()
+        m2 = ChatClient._FENCE_CLOSE_RE.search(text, body_start)
+        if not m2: return None
+        body = text[body_start:m2.start()]
+        if body.startswith("\n"): body = body[1:]
+        return lang, body, m2.end()
 
-    def _resolve_replace_range(self, file_lines: List[str], blk: ReplaceBlock, tol: int = 2) -> Optional[Tuple[int, int]]:
-        n = len(file_lines)
-        if n <= 0: return None
-        x, y = self._strip_line_token(blk.x), self._strip_line_token(blk.y)
-        a, b = self._find_near(file_lines, int(blk.lx), x, tol=tol), self._find_near(file_lines, int(blk.ly), y, tol=tol)
-        if a is None and n < int(blk.lx) <= n + 2: a = n
-        if b is None and n < int(blk.ly) <= n + 2: b = n
-        if a is None or b is None or a > b: return None
-        return a, b
+    @classmethod
+    def _find_unique_anchor_span(cls, lines: List[str], x: str, y: str, hint_lines: Optional[List[str]] = None, single: bool = False) -> Optional[Tuple[int, int]]:
+        if not lines: return None
+        a, b = cls._canon_line(x), cls._canon_line(y)
+        if single:
+            hits = [i for i, li in enumerate(lines) if cls._canon_line(li) == a]
+            return (hits[0] + 1, hits[0] + 1) if len(hits) == 1 else None
+
+        def indent(s: str) -> int: return len(s) - len((s or "").lstrip(" \t"))
+
+        cands: List[Tuple[int, int]] = []
+        for i, li in enumerate(lines):
+            if cls._canon_line(li) != a: continue
+            for j in range(i, len(lines)):
+                if cls._canon_line(lines[j]) != b: continue
+                cands.append((i, j))
+        if len(cands) == 1: return (cands[0][0] + 1, cands[0][1] + 1)
+        if not cands: return None
+
+        picks: List[Tuple[int, int]] = []
+
+        def next_content_indent(j: int) -> Optional[int]:
+            for k in range(j + 1, len(lines)):
+                if cls._canon_line(lines[k]) == "": continue
+                return indent(lines[k])
+            return None
+
+        for i, j in cands:
+            t0, tj, tn = indent(lines[i]), indent(lines[j]), next_content_indent(j)
+            if tj != t0 and tn != t0: continue
+            seen, ok = False, True
+            for k in range(i + 1, j):
+                if cls._canon_line(lines[k]) == "": continue
+                tk = indent(lines[k])
+                if tk < t0: ok = False; break
+                if not seen:
+                    if tk > t0: seen = True; continue
+                    continue
+                if tk <= t0: ok = False; break
+            if ok and seen: picks.append((i, j))
+            if len(picks) > 1: break
+
+        if len(picks) == 1: return (picks[0][0] + 1, picks[0][1] + 1)
+        if len(picks) > 1: cands = picks
+
+        hint = [cls._canon_line(z) for z in (hint_lines or []) if cls._canon_line(z)]
+        if len(set(hint)) < REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS: return None
+        hint_set = set(hint)
+
+        cand_line_sets: List[Set[str]] = []
+        for i, j in cands: cand_line_sets.append({cls._canon_line(z) for z in lines[i:j + 1] if cls._canon_line(z)})
+
+        owners: Dict[str, Set[int]] = {}
+        for idx, s in enumerate(cand_line_sets):
+            for z in (s & hint_set): owners.setdefault(z, set()).add(idx)
+
+        scores = []
+        for idx in range(len(cands)): scores.append(sum(1 for z in hint_set if owners.get(z) == {idx}))
+        best = max(scores) if scores else 0
+        if best < REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS or scores.count(best) != 1: return None
+        i, j = cands[scores.index(best)]
+        return (i + 1, j + 1)
 
     def render_for_display(self, md: str) -> str:
         md = md or ""
-        if "replace" not in md.lower(): return md
-
+        if "####" not in md: return md
         lines, out = md.split("\n"), []
-        cur_edit_file, pending = None, None  # {"hdr": str, "blk": ReplaceBlock, "between": List[str]}
+        cur_file, pending = None, None  # {"op": str, "x": str, "y": str, "hdr": str, "between": List[str]}
 
-        def flush_pending() -> None:
+        def flush() -> None:
             nonlocal pending
             if not pending: return
-            out.append(pending["hdr"])  # type: ignore[index]
-            out += (pending["between"] or [])  # type: ignore[operator]
-            pending = None
+            out.append(pending["hdr"]); out += pending["between"]; pending = None
 
-        def parse_hdr(line: str) -> Optional[ReplaceBlock]:
-            m = self._REPLACE_HDR_RE.match(line)
-            return self._blk_from_replace_match(m) if m else None
+        def parse_hdr(line: str) -> Optional[Tuple[str, str, str, bool]]:
+            if m := self._REPLACE_HDR_RE.match(line): op = "replace"
+            elif m := self._INSERT_AFTER_HDR_RE.match(line): op = "insert_after"
+            elif m := self._INSERT_BEFORE_HDR_RE.match(line): op = "insert_before"
+            else: return None
+            x, y, single = (m.group(1) or ""), (m.group(2) or ""), (m.group(2) is None)
+            return op, x, (y if y != "" else x), single
 
-        for line in lines:
+        for idx, line in enumerate(lines):
             if medit := self._EDIT_HDR_RE.match(line):
-                flush_pending()
-                cur_edit_file = (medit.group(1) or "").strip().replace("`", "")
+                flush()
+                cur_file = (medit.group(1) or "").strip().replace("`", "")
                 out.append(line)
                 continue
 
-            if not cur_edit_file: out.append(line); continue
+            if not cur_file: out.append(line); continue
 
             if pending:
-                if mfence := self._FENCE_OPEN_LINE_RE.match(line):
+                if mfence := self._FENCE_OPEN_RE.match(line):
+                    op, between, x, y = pending["op"], pending["between"], pending["x"], pending["y"]
                     lang = (mfence.group(1) or "").strip()
-                    path = self._resolve_path(cur_edit_file, create_if_missing=False)
+                    path = self._resolve_path(cur_file, create_if_missing=False)
                     file_lines = self._get_file_lines_cached(path) if path else None
-                    between = pending["between"] or []  # type: ignore[assignment]
-                    blk: ReplaceBlock = pending["blk"]  # type: ignore[assignment]
-                    a, b = (None, None)
-                    if file_lines:
-                        r = self._resolve_replace_range(file_lines, blk, tol=2)
-                        if r: a, b = r
-                    should_inject = bool(lang and file_lines and a and b and (1 <= a <= b <= len(file_lines)) and not any(self._FENCE_ANY_LINE_RE.match(x) for x in between))
-                    out.append(f"####REPLACE {int(a) if a else blk.lx}-{int(b) if b else blk.ly}")
+                    span = self._find_unique_anchor_span(file_lines or [], x, y, single=pending["single"]) if file_lines else None
+                    if not span:
+                        close = next((k for k in range(idx + 1, len(lines)) if self._FENCE_CLOSE_RE.match(lines[k])), None)
+                        hint = (lines[idx + 1:close] if close is not None else None)
+                        span = self._find_unique_anchor_span(file_lines or [], x, y, hint_lines=hint, single=pending["single"]) if (file_lines and hint is not None) else None
+                    a, b = span if span else (None, None)
+                    inject_ok = bool(lang and file_lines and a and b and not any(self._FENCE_ANY_LINE_RE.match(z) for z in between))
+                    hdr = ("Replace" if op == "replace" else ("Insert After" if op == "insert_after" else "Insert Before"))
+                    out.append(f"#### {hdr} {a}-{b}" if a and b else pending["hdr"])
                     out += between
-                    if should_inject: out += [f"```{lang}".rstrip(), "\n".join(file_lines[a - 1:b]), "```", "####WITH"]  # type: ignore[operator]
+                    if inject_ok: out += [f"```{lang}".rstrip(), "\n".join(file_lines[a - 1:b]), "```", ("#### WITH" if op == "replace" else "#### ADD")]
                     pending = None
                     out.append(line)
                     continue
 
-                if blk2 := parse_hdr(line):
-                    flush_pending()
-                    pending = {"hdr": f"####REPLACE {blk2.lx}-{blk2.ly}", "blk": blk2, "between": []}
+                if h2 := parse_hdr(line):
+                    flush()
+                    pending = {"op": h2[0], "x": h2[1], "y": h2[2], "single": h2[3], "hdr": line, "between": []}
                     continue
 
-                pending["between"].append(line)  # type: ignore[index]
+                pending["between"].append(line)
                 continue
 
-            if blk := parse_hdr(line):
-                pending = {"hdr": f"####REPLACE {blk.lx}-{blk.ly}", "blk": blk, "between": []}
+            if h := parse_hdr(line):
+                pending = {"op": h[0], "x": h[1], "y": h[2], "single": h[3], "hdr": line, "between": []}
                 continue
 
             out.append(line)
 
-        flush_pending()
+        flush()
         return "\n".join(out)
+
 
     def set_last_assistant_display(self, display_md: str) -> None:
         if self._last_assistant_index is not None: self._display_overrides[self._last_assistant_index] = display_md or ""
@@ -362,42 +403,36 @@ class ChatClient:
     def parse_edit_markdown(self, md: str) -> List[EditDirective]:
         if not md: return []
         text = self._norm_newlines(md)
-        matches = list(self._EDIT_HDR_RE.finditer(text))
+        edits = list(self._EDIT_HDR_RE.finditer(text))
         out: List[EditDirective] = []
 
-        for i, m in enumerate(matches):
+        for i, m in enumerate(edits):
             filename = (m.group(1) or "").strip().replace("`", "")
-            start = m.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            start, end = m.end(), (edits[i + 1].start() if i + 1 < len(edits) else len(text))
             section = text[start:end].strip()
 
             replaces: List[ReplaceBlock] = []
             pos = 0
+
+            def next_hdr(at: int) -> Tuple[Optional[str], Optional[re.Match]]:
+                r = [( "replace", self._REPLACE_HDR_RE.search(section, at) ), ("insert_after", self._INSERT_AFTER_HDR_RE.search(section, at)), ("insert_before", self._INSERT_BEFORE_HDR_RE.search(section, at))]
+                r = [(op, m) for op, m in r if m]
+                if not r: return None, None
+                op, m = min(r, key=lambda t: t[1].start())
+                return op, m
+
             while True:
-                r = self._REPLACE_HDR_RE.search(section, pos)
+                op, r = next_hdr(pos)
                 if not r: break
-                mnew = self._CODE_FENCE_RE.search(section, r.end())
-                if not mnew: break
-                blk = self._blk_from_replace_match(r)
-                replaces.append(ReplaceBlock(x=blk.x, y=blk.y, lx=blk.lx, ly=blk.ly, new=mnew.group(2), lang=(mnew.group(1) or "").strip()))
-                pos = mnew.end()
+                f_new = self._parse_fence_from(section, r.end())
+                if not f_new: break
+                x, y, single = (r.group(1) or ""), (r.group(2) or ""), (r.group(2) is None)
+                replaces.append(ReplaceBlock(x=x, y=(y if y != "" else x), single=single, new=f_new[1], lang=(f_new[0] or "").strip(), op=op or "replace"))
+                pos = f_new[2]
 
-            if not replaces:
-                fences = list(self._CODE_FENCE_RE.finditer(section))
-                if len(fences) == 1:
-                    f = fences[0]
-                    replaces = []
-
-            expl_cut = min([x.start() for x in (self._REPLACE_HDR_RE.search(section), self._CODE_FENCE_RE.search(section)) if x], default=None)
+            expl_cut = min([x.start() for x in (self._REPLACE_HDR_RE.search(section), self._INSERT_AFTER_HDR_RE.search(section), self._INSERT_BEFORE_HDR_RE.search(section), self._FENCE_OPEN_RE.search(section)) if x], default=None)
             expl = section[:expl_cut].strip() if expl_cut is not None else section.strip()
-
-            if replaces:
-                out.append(EditDirective(kind="EDIT", filename=filename, explanation=expl, replaces=replaces))
-            else:
-                fences = list(self._CODE_FENCE_RE.finditer(section))
-                if len(fences) == 1:
-                    f = fences[0]
-                    out.append(EditDirective(kind="EDIT", filename=filename, explanation=expl, replaces=[ReplaceBlock(x="", lx=0, y="", ly=0, new=f.group(2), lang=(f.group(1) or "").strip())]))
+            if replaces: out.append(EditDirective(kind="EDIT", filename=filename, explanation=expl, replaces=replaces))
 
         return out
 
@@ -442,7 +477,6 @@ class ChatClient:
                 if len(hits) > 1: break
         if len(hits) == 1: return hits[0].as_posix()
         if len(hits) > 1: return None
-
         return rel0.as_posix() if create_if_missing else None
 
     def _atomic_write(self, path: Path, content: str):
@@ -452,6 +486,12 @@ class ChatClient:
             with contextlib.suppress(Exception): os.fsync(tmp.fileno())
             tmp_name = tmp.name
         os.replace(tmp_name, str(path))
+
+    @staticmethod
+    def _count_lines_norm(s: str) -> int:
+        t = (s or "").replace("\r\n", "\n").replace("\r", "\n")
+        if t.endswith("\n"): t = t[:-1]
+        return 0 if t == "" else t.count("\n") + 1
 
     def apply_markdown_edits(self, md: str) -> List[EditEvent]:
         directives = self.parse_edit_markdown(md)
@@ -467,79 +507,47 @@ class ChatClient:
             p = _abs(rel)
             tx["files"][rel] = p.read_text(encoding="utf-8") if p.exists() else None
 
-        def _count_lines(s: str) -> int:
-            norm = self._norm_newlines(s or "")
-            ls = norm.split("\n")
-            if norm.endswith("\n"): ls = ls[:-1]
-            return len(ls)
-
         for d in directives:
             try:
-                target = self._resolve_path(d.filename, create_if_missing=True)
-                if not target: results.append(EditEvent("error", Path(d.filename).name, "Invalid path (must be relative to base dir)", d.filename)); continue
+                target = self._resolve_path(d.filename, create_if_missing=False)
+                if not target: results.append(EditEvent("error", Path(d.filename).name, "Invalid path (must exist, relative to base dir)", d.filename)); continue
                 rel, p = target, _abs(target)
                 if not p.is_relative_to(BASE_DIR): results.append(EditEvent("error", Path(rel).name, "Path escapes base dir", rel)); continue
+                if not p.exists(): results.append(EditEvent("error", Path(rel).name, "File does not exist (no rewrite mode)", rel)); continue
+                if not d.replaces: results.append(EditEvent("error", Path(rel).name, "No replace blocks found", rel)); continue
 
-                is_new = not p.exists()
-                original = p.read_text(encoding="utf-8") if not is_new else ""
-
-                if not d.replaces: results.append(EditEvent("error", Path(rel).name, "No edit blocks found", rel)); continue
-
-                full = [b for b in d.replaces if b.lx == 0 and b.ly == 0]
-                if full:
-                    if len(full) != 1 or len(d.replaces) != 1: results.append(EditEvent("error", Path(rel).name, "Full rewrites must contain exactly one fenced block", rel)); continue
-                    body = self._norm_newlines(full[0].new)
-                    if is_new:
-                        norm2 = body.rstrip("\n")
-                        updated = norm2 + ("\n" if norm2 else "")
-                    else:
-                        eol = "\r\n" if "\r\n" in original else "\n"
-                        had_final_nl = self._norm_newlines(original).endswith("\n")
-                        norm2 = body.rstrip("\n")
-                        updated = (norm2 + ("\n" if had_final_nl else "")).replace("\n", eol)
-                    _remember_prev(rel)
-                    self._atomic_write(p, updated)
-                    tx["changed"].add(rel)
-                    results.append(EditEvent("complete", Path(rel).name, f"{'created' if is_new else 'rewritten'}: {_count_lines(original) if not is_new else 0} → {_count_lines(updated)} lines", rel))
-                    continue
-
-                if is_new: results.append(EditEvent("error", Path(rel).name, "New files must be created via a full rewrite (single fenced block)", rel)); continue
-
+                original = p.read_text(encoding="utf-8")
                 eol = "\r\n" if "\r\n" in original else "\n"
                 norm = self._norm_newlines(original)
                 had_final_nl = norm.endswith("\n")
-                orig_lines = norm.split("\n")
-                if had_final_nl: orig_lines = orig_lines[:-1]
+                lines = norm.split("\n")
+                if had_final_nl: lines = lines[:-1]
 
-                resolved: List[Tuple[int, int, List[str]]] = []
-                missing: List[str] = []
-
+                spans: List[Tuple[int, int, List[str], str]] = []
                 for blk in d.replaces:
-                    rng = self._resolve_replace_range(orig_lines, blk, tol=2)
-                    if not rng: missing.append(f"{blk.lx}-{blk.ly}"); continue
-                    a, b = rng
-                    new_norm = self._norm_newlines(blk.new)
-                    new_lines = new_norm.split("\n")
-                    if new_norm.endswith("\n"): new_lines = new_lines[:-1]
-                    resolved.append((a, b, new_lines))
+                    new_norm = self._norm_newlines(blk.new).rstrip("\n")
+                    new_lines = ([] if new_norm == "" else new_norm.split("\n"))
+                    span = self._find_unique_anchor_span(lines, blk.x, blk.y, hint_lines=new_lines, single=blk.single)
+                    if not span: raise RuntimeError("Could not uniquely match Replace anchors (X/Y) in file")
+                    a, b = span
+                    i0, i1 = ((a - 1, b) if blk.op == "replace" else ((b, b) if blk.op == "insert_after" else (a - 1, a - 1)))
+                    spans.append((i0, i1, new_lines, blk.op))
 
-                if missing: results.append(EditEvent("error", Path(rel).name, f"Could not match anchor line(s) near: {', '.join(missing)}", rel)); continue
+                spans.sort(key=lambda t: (t[0], t[1]))
+                for (a1, b1, _, _), (a2, b2, _, _) in zip(spans, spans[1:]):
+                    if a2 < b1: raise RuntimeError(f"Overlapping edit ranges: {a1 + 1}-{b1} and {a2 + 1}-{b2}")
 
-                resolved.sort(key=lambda t: (t[0], t[1]))
-                for (a1, b1, _), (a2, b2, _) in zip(resolved, resolved[1:]):
-                    if a2 <= b1: raise RuntimeError(f"Overlapping replace ranges: {a1}-{b1} and {a2}-{b2}")
+                updated_lines = lines[:]
+                for i0, i1, new_lines, _ in sorted(spans, key=lambda t: (t[0], t[1]), reverse=True): updated_lines[i0:i1] = new_lines
 
-                lines = orig_lines[:]
-                for a, b, new_lines in sorted(resolved, key=lambda t: (t[0], t[1]), reverse=True): lines[a - 1:b] = new_lines
-
-                norm2 = "\n".join(lines) + ("\n" if had_final_nl else "")
-                updated = norm2 if eol == "\n" else norm2.replace("\n", "\r\n")
+                updated_norm = ("\n".join(updated_lines) + ("\n" if had_final_nl else ""))
+                updated = updated_norm if eol == "\n" else updated_norm.replace("\n", "\r\n")
                 if updated == original: results.append(EditEvent("error", Path(rel).name, "No changes applied", rel)); continue
 
                 _remember_prev(rel)
                 self._atomic_write(p, updated)
                 tx["changed"].add(rel)
-                results.append(EditEvent("complete", Path(rel).name, f"replaced {len(resolved)} range(s): {len(orig_lines)} → {_count_lines(updated)} lines", rel))
+                results.append(EditEvent("complete", Path(rel).name, f"applied {len(spans)} edit(s): {self._count_lines_norm(original)} → {self._count_lines_norm(updated)} lines", rel))
             except Exception as e:
                 results.append(EditEvent("error", Path(d.filename).name, f"Error: {e}", d.filename))
 

@@ -8,15 +8,14 @@ import tempfile
 import uuid
 from urllib.parse import urlparse
 from pathlib import Path
+
 import httpx
 from nicegui import app, ui
 
 from chat_utils import (
     DEFAULT_REASONING, ChatClient, search_files, STYLE_CSS, MODELS, REASONING_LEVELS,
-    DEFAULT_MODEL, EXTRACT_ADD_ON, ReasoningEvent, FILE_LIKE_EXTS
+    DEFAULT_MODEL, EXTRACT_ADD_ON, ReasoningEvent, FILE_LIKE_EXTS,
 )
-
-# --- Constants & Config ---
 
 P_PROPS = 'dark outlined dense color=white'
 MD_EXTRAS = ['break-on-newline', 'fenced-code-blocks', 'tables', 'cuddled-lists', 'mermaid', 'latex', 'code-friendly']
@@ -65,7 +64,6 @@ HEAD_CSS = '''
 </style>
 '''
 
-# --- Helpers ---
 
 def looks_like_url(sv: str) -> bool:
     if not sv: return False
@@ -74,11 +72,13 @@ def looks_like_url(sv: str) -> bool:
     ul = u.lower()
     return ul.startswith('http://') or ul.startswith('https://') or ul.startswith('www.')
 
+
 def normalize_url(u: str) -> str:
     u = (u or '').strip()
     if not u: return ''
     if u.lower().startswith('www.'): return 'http://' + u
     return u
+
 
 async def fetch_url_content(url: str) -> str:
     try:
@@ -123,11 +123,7 @@ async def fetch_url_content(url: str) -> str:
             profile_dir = Path(d) / 'profile'
             profile_dir.mkdir(parents=True, exist_ok=True)
             async with async_playwright() as p:
-                ctx = await p.chromium.launch_persistent_context(
-                    str(profile_dir),
-                    headless=headless,
-                    args=['--disable-blink-features=AutomationControlled'],
-                )
+                ctx = await p.chromium.launch_persistent_context(str(profile_dir), headless=headless, args=['--disable-blink-features=AutomationControlled'])
                 try:
                     page = await ctx.new_page()
                     await page.goto(target, wait_until='networkidle', timeout=60_000)
@@ -140,7 +136,6 @@ async def fetch_url_content(url: str) -> str:
     if status == 403:
         html = await playwright_get_html(u)
         ctype, status = 'text/html', 200
-
     if status >= 400:
         raise httpx.HTTPStatusError(f'{status} {u}', request=None, response=None)
 
@@ -167,6 +162,7 @@ async def fetch_url_content(url: str) -> str:
     hdr = f"URL: {u}\n" + (f"Title: {title}\n" if title else '')
     return hdr + "\n" + text + "\n"
 
+
 async def run_timer(label, storage_tab):
     start = time.time()
     while storage_tab.get('streaming') and label:
@@ -175,14 +171,12 @@ async def run_timer(label, storage_tab):
             label.text = f"{elapsed // 60}:{(elapsed % 60):02d}"
         await asyncio.sleep(1.0)
 
-# --- Main Page ---
 
 @ui.page('/')
 async def main_page():
     await ui.context.client.connected()
     s = app.storage.tab
 
-    # Persistent state defaults
     defaults = {
         'chat': ChatClient(), 'draft': '', 'model': DEFAULT_MODEL,
         'reasoning': DEFAULT_REASONING, 'mode': 'chat+edit', 'streaming': False,
@@ -190,7 +184,6 @@ async def main_page():
         'file_idx': -1, 'edit_history': [], 'pending_edits_text': None,
         'apply_all_bubble': None, 'last_edit_round_status': None,
         'url_attachments': [],
-        # Streaming state
         'session_id': str(uuid.uuid4()), 'stream_buffer': [],
         'stream_done': False, 'stream_error': None, 'render_pos': 0,
         'finalized': False, 'producer_task': None, 'consumer_timer': None,
@@ -199,7 +192,6 @@ async def main_page():
     for k, v in defaults.items():
         s.setdefault(k, v)
 
-    # Ephemeral state cleanup
     for k in ('container', 'container_id', 'answer_md', 'answer_container', 'answer_id', 'stream'):
         s.pop(k, None)
 
@@ -215,6 +207,7 @@ async def main_page():
         with tools:
             copy_btn_id = f'{target_id}-copy'
             btn = None
+
             async def on_copy(getter=get_text or (lambda: '')):
                 text = (getter() or '').rstrip()
                 ui.clipboard.write(text)
@@ -222,7 +215,7 @@ async def main_page():
                     btn.classes('copied')
                     await asyncio.sleep(1)
                     btn.classes(remove='copied')
-            
+
             btn = ui.button('', on_click=on_copy).props('icon=content_copy flat dense').classes('tool-btn copy-icon').props(f'id={copy_btn_id}')
             if with_timer:
                 timer = ui.label('0:00').classes('timer')
@@ -245,13 +238,13 @@ async def main_page():
                 with ui.element('div').classes('flex justify-start mb-3'):
                     with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble').props(f'id={aid}'):
                         if is_stream:
-                            # Single markdown block for streaming
                             ans_container = ui.column().classes('answer-content no-gap')
                             s['answer_id'] = aid
                             s['answer_container'] = ans_container
                             with ans_container:
                                 md = ui.markdown('', extras=MD_EXTRAS).classes(MD_CLASSES)
                             s['answer_md'] = md
+
                             def getter():
                                 md = s.get('answer_md')
                                 return md.content if md else ''
@@ -338,7 +331,6 @@ async def main_page():
         full_text = (full_text or '').rstrip() or 'Response stopped.'
         with contextlib.suppress(Exception):
             s['chat'].ensure_last_assistant_nonempty(full_text)
-
         rendered = s['chat'].render_for_display(full_text)
         with contextlib.suppress(Exception):
             s['chat'].set_last_assistant_display(rendered)
@@ -372,10 +364,10 @@ async def main_page():
         with contextlib.suppress(Exception):
             old = s.pop('apply_all_bubble', None)
             if old: old.delete()
-        
+
         s['pending_edits_text'] = full_text
         s['last_edit_round_status'] = 'pending'
-        
+
         with s['container']:
             with ui.element('div').classes('flex justify-center mb-2'):
                 bubble = ui.element('div').classes('edit-bubble')
@@ -383,6 +375,7 @@ async def main_page():
                 with bubble:
                     ui.icon('tips_and_updates').classes('text-blue-300')
                     ui.label('Edits available. Apply to all files?').classes('text-blue-200 text-sm')
+
                     async def on_apply():
                         with contextlib.suppress(Exception):
                             b = s.pop('apply_all_bubble', None)
@@ -391,6 +384,7 @@ async def main_page():
                         s['pending_edits_text'] = None
                         await apply_edits_from_response(text)
                         s['last_edit_round_status'] = 'applied'
+
                     ui.button('Apply edits', on_click=on_apply).props('flat dense size=sm color=positive').classes('ml-2')
 
     def clear_edit_round_state(before_send: bool = False) -> str | None:
@@ -409,15 +403,12 @@ async def main_page():
             if b: b.delete()
         return note
 
-    # --- Streaming Logic ---
-
     _CODE_FENCE_RE = re.compile(r'(?m)^\s*```')
 
     def with_temp_code_fence(text: str) -> str:
-        if not text or len(_CODE_FENCE_RE.findall(text)) % 2 == 0:
-            return text
+        if not text or len(_CODE_FENCE_RE.findall(text)) % 2 == 0: return text
         return text + ('```' if text.endswith('\n') else '\n```')
-    
+
     def cancel_producer():
         t = s.get('producer_task')
         if t and not t.done(): t.cancel()
@@ -482,7 +473,6 @@ async def main_page():
                 s['finalized'] = True
                 s['streaming'] = False
                 stop_consumer()
-                
                 err = s.get('stream_error')
                 if err:
                     ui.notify(f"Error: {err}", type='negative')
@@ -615,8 +605,6 @@ async def main_page():
             with contextlib.suppress(Exception): await event.prevent_default()
             await send()
 
-    # --- File Search & Attachment ---
-
     def render_file_results():
         file_results_container.clear()
         results = s.get('file_results') or []
@@ -673,7 +661,7 @@ async def main_page():
         key = event.args.get('key')
         results = s.get('file_results') or []
         n = len(results)
-        
+
         if key in ('ArrowDown', 'Down'):
             if n == 0: return
             s['file_idx'] = (s.get('file_idx', -1) + 1) % n
@@ -699,7 +687,7 @@ async def main_page():
                 if n == 0: return
                 attach_multiple(results)
                 return
-            
+
             i = s.get('file_idx', -1)
             if n == 0: return
             if not (0 <= i < n): i = 0
@@ -730,8 +718,6 @@ async def main_page():
         file_results_container.clear()
         focus_file_search()
 
-    # --- Layout ---
-
     with ui.element('div').classes('fixed-header'):
         with ui.row().classes('gap-4 p-3 w-full'):
             model_select = ui.select(MODELS, label='Model').props(P_PROPS).classes('text-white w-56').bind_value(app.storage.tab, 'model')
@@ -746,7 +732,7 @@ async def main_page():
     with chat_stack:
         s['container_id'] = f'chat-{time.time_ns()}'
         s['container'] = ui.column().classes('chat-container').props(f'id={s["container_id"]}')
-    
+
     refresh_ui()
 
     def reattach_consumer_if_needed():
@@ -764,6 +750,7 @@ async def main_page():
                 ui.button('Back', on_click=undo, icon='undo').bind_visibility_from(s, 'streaming', lambda v: not v).props('color=orange')
                 ui.button('Stop', on_click=stop_streaming, icon='stop').bind_visibility_from(s, 'streaming').props('color=red')
                 ui.button('Clear', on_click=clear_chat, icon='delete').props('color=grey')
+
 
 if __name__ in {'__main__', '__mp_main__'}:
     parser = argparse.ArgumentParser()

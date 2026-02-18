@@ -27,30 +27,35 @@ LaTeX with single (inline) or double (display) dollar sign delimiters for mathem
 Single-letter variable names for maths;
 Markdown tables and mermaid diagrams when appropriate, with quotes for mermaid labels.
 
-Files may be attached, which will have display-only line numbers prepended.
 Finally, as you prepare your answer, ensure that it adheres to all the instructions and guidelines above.'''
 
-EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections exactly as follows:
+EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections exactly as follows, filling in all placeholders;
 
 ### Edit <filepath>
-<Detailed explanation of file-level changes>
+<Detailed overview of file-level changes>
+<Methodical list of which parts of the file you will be changing and how>
 
-#### Replace `X`-`Y` Lines XX-YY
+#### <command> `X`-`Y`
 <replacement fence>
 
-#### Replace `X` Line XX
+#### <command> `X`
 <replacement fence>
 
 Rules:
-`X` and `Y` contain the full original line contents, while XX and YY are the corresponding line numbers;
-There can be multiple Replace per Edit, with non-overlapping line ranges in any order;
-Plan replacement ranges meticulously before answering, ensuring they are surgical, minimal, and devoid of blocks of unchanged code;
+The command can be "Replace", "Insert Before" or "Insert After";
+Place full original line contents into X and Y;
+X-Y specifies a range, X alone a single line;
+Ensure X is always unique (Y is easier to match, and ok if not unique);
+There can be multiple commands per Edit with non-overlapping line ranges in any order;
+Replacement ranges should be surgical, minimal, and devoid of unchanged code blocks;
+Ensure that new code slots in correctly, paying attention to start-end lines and intentation;
 Remove dead code;
 Use an empty replacement fence to delete code;
-File paths are relative to a base directory, always specify them in full;
+File paths are relative to a base directory, specify them in full;
 Using only Edit will perform a full file replacement or creation;
 Identify a suitable location for new files, typically in the same directory as related files.
 
+Before beginning your answer, plan each and every command and its type meticulously to adhere to all the above rules.
 You may create new files to implement new functionality or to refactor existing code.
 Remember that earlier modifications will now be part of the file.'''
 
