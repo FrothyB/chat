@@ -138,6 +138,7 @@ class ReplaceBlock:
     x: str
     y: str
     single: bool = False
+    occ: Optional[int] = None
     new: str = ""
     lang: str = ""
     op: str = "replace"  # "replace" | "insert_after" | "insert_before"
@@ -153,9 +154,9 @@ class EditDirective:
 class ChatClient:
     _EDIT_TRIGGER_RE = re.compile(r"\b(?:edit|rewrite)\b", re.IGNORECASE)
     _EDIT_HDR_RE = re.compile(r"(?mi)^\s*###\s*edit\s+(.+?)\s*$")
-    _REPLACE_HDR_RE = re.compile(r"(?mi)^\s*####\s*replace\s+`([^\n`]*)`(?:\s*-\s*`([^\n`]*)`)?\s*$")
-    _INSERT_AFTER_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+after\s+`([^\n`]*)`(?:\s*-\s*`([^\n`]*)`)?\s*$")
-    _INSERT_BEFORE_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+before\s+`([^\n`]*)`(?:\s*-\s*`([^\n`]*)`)?\s*$")
+    _REPLACE_HDR_RE = re.compile(r"(?mi)^\s*####\s*replace\s+`([^\n`]*)`\s*(?:(\d+)\s*)?(?:-\s*`([^\n`]*)`\s*(?:(\d+)\s*)?)?\s*$")
+    _INSERT_AFTER_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+after\s+`([^\n`]*)`\s*(?:(\d+)\s*)?(?:-\s*`([^\n`]*)`\s*(?:(\d+)\s*)?)?\s*$")
+    _INSERT_BEFORE_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+before\s+`([^\n`]*)`\s*(?:(\d+)\s*)?(?:-\s*`([^\n`]*)`\s*(?:(\d+)\s*)?)?\s*$")
     _FENCE_OPEN_RE = re.compile(r"(?m)^\s*```[ \t]*([^\n`]*)\s*$")
     _FENCE_CLOSE_RE = re.compile(r"(?m)^\s*```\s*$")
     _FENCE_ANY_LINE_RE = re.compile(r"(?m)^\s*```")
@@ -268,18 +269,20 @@ class ChatClient:
         return lang, body, m2.end()
 
     @classmethod
-    def _find_unique_anchor_span(cls, lines: List[str], x: str, y: str, hint_lines: Optional[List[str]] = None, single: bool = False) -> Optional[Tuple[int, int]]:
+    def _find_unique_anchor_span(cls, lines: List[str], x: str, y: str, hint_lines: Optional[List[str]] = None, single: bool = False, occ: Optional[int] = None) -> Optional[Tuple[int, int]]:
         if not lines: return None
         a, b = cls._canon_line(x), cls._canon_line(y)
-        if single:
-            hits = [i for i, li in enumerate(lines) if cls._canon_line(li) == a]
-            return (hits[0] + 1, hits[0] + 1) if len(hits) == 1 else None
+
+        hits_x = [i for i, li in enumerate(lines) if cls._canon_line(li) == a]
+        if occ is not None:
+            if occ < 1 or occ > len(hits_x): return None
+            hits_x = [hits_x[occ - 1]]
+        if single: return (hits_x[0] + 1, hits_x[0] + 1) if len(hits_x) == 1 else None
 
         def indent(s: str) -> int: return len(s) - len((s or "").lstrip(" \t"))
 
         cands: List[Tuple[int, int]] = []
-        for i, li in enumerate(lines):
-            if cls._canon_line(li) != a: continue
+        for i in hits_x:
             for j in range(i, len(lines)):
                 if cls._canon_line(lines[j]) != b: continue
                 cands.append((i, j))
@@ -341,13 +344,17 @@ class ChatClient:
             if not pending: return
             out.append(pending["hdr"]); out += pending["between"]; pending = None
 
-        def parse_hdr(line: str) -> Optional[Tuple[str, str, str, bool]]:
+        def parse_hdr(line: str) -> Optional[Tuple[str, str, str, bool, Optional[int]]]:
             if m := self._REPLACE_HDR_RE.match(line): op = "replace"
             elif m := self._INSERT_AFTER_HDR_RE.match(line): op = "insert_after"
             elif m := self._INSERT_BEFORE_HDR_RE.match(line): op = "insert_before"
             else: return None
-            x, y, single = (m.group(1) or ""), (m.group(2) or ""), (m.group(2) is None)
-            return op, x, (y if y != "" else x), single
+            x, occ, y_raw = (m.group(1) or ""), (m.group(2) or "").strip(), m.group(3)
+            _ = (m.group(4) or "").strip()
+            n = int(occ) if occ else None
+            single = (y_raw is None)
+            y = x if (y_raw is None or y_raw == "") else y_raw
+            return op, x, y, single, n
 
         for idx, line in enumerate(lines):
             if medit := self._EDIT_HDR_RE.match(line):
@@ -360,15 +367,15 @@ class ChatClient:
 
             if pending:
                 if mfence := self._FENCE_OPEN_RE.match(line):
-                    op, between, x, y = pending["op"], pending["between"], pending["x"], pending["y"]
+                    op, between, x, y, occ = pending["op"], pending["between"], pending["x"], pending["y"], pending.get("occ")
                     lang = (mfence.group(1) or "").strip()
                     path = self._resolve_path(cur_file, create_if_missing=False)
                     file_lines = self._get_file_lines_cached(path) if path else None
-                    span = self._find_unique_anchor_span(file_lines or [], x, y, single=pending["single"]) if file_lines else None
+                    span = self._find_unique_anchor_span(file_lines or [], x, y, single=pending["single"], occ=occ) if file_lines else None
                     if not span:
                         close = next((k for k in range(idx + 1, len(lines)) if self._FENCE_CLOSE_RE.match(lines[k])), None)
                         hint = (lines[idx + 1:close] if close is not None else None)
-                        span = self._find_unique_anchor_span(file_lines or [], x, y, hint_lines=hint, single=pending["single"]) if (file_lines and hint is not None) else None
+                        span = self._find_unique_anchor_span(file_lines or [], x, y, hint_lines=hint, single=pending["single"], occ=occ) if (file_lines and hint is not None) else None
                     a, b = span if span else (None, None)
                     inject_ok = bool(lang and file_lines and a and b and not any(self._FENCE_ANY_LINE_RE.match(z) for z in between))
                     hdr = ("Replace" if op == "replace" else ("Insert After" if op == "insert_after" else "Insert Before"))
@@ -381,14 +388,14 @@ class ChatClient:
 
                 if h2 := parse_hdr(line):
                     flush()
-                    pending = {"op": h2[0], "x": h2[1], "y": h2[2], "single": h2[3], "hdr": line, "between": []}
+                    pending = {"op": h2[0], "x": h2[1], "y": h2[2], "single": h2[3], "occ": h2[4], "hdr": line, "between": []}
                     continue
 
                 pending["between"].append(line)
                 continue
 
             if h := parse_hdr(line):
-                pending = {"op": h[0], "x": h[1], "y": h[2], "single": h[3], "hdr": line, "between": []}
+                pending = {"op": h[0], "x": h[1], "y": h[2], "single": h[3], "occ": h[4], "hdr": line, "between": []}
                 continue
 
             out.append(line)
@@ -426,8 +433,12 @@ class ChatClient:
                 if not r: break
                 f_new = self._parse_fence_from(section, r.end())
                 if not f_new: break
-                x, y, single = (r.group(1) or ""), (r.group(2) or ""), (r.group(2) is None)
-                replaces.append(ReplaceBlock(x=x, y=(y if y != "" else x), single=single, new=f_new[1], lang=(f_new[0] or "").strip(), op=op or "replace"))
+                x, occ, y_raw = (r.group(1) or ""), (r.group(2) or "").strip(), r.group(3)
+                _ = (r.group(4) or "").strip()
+                n = int(occ) if occ else None
+                single = (y_raw is None)
+                y = x if (y_raw is None or y_raw == "") else y_raw
+                replaces.append(ReplaceBlock(x=x, y=y, single=single, occ=n, new=f_new[1], lang=(f_new[0] or "").strip(), op=op or "replace"))
                 pos = f_new[2]
 
             expl_cut = min([x.start() for x in (self._REPLACE_HDR_RE.search(section), self._INSERT_AFTER_HDR_RE.search(section), self._INSERT_BEFORE_HDR_RE.search(section), self._FENCE_OPEN_RE.search(section)) if x], default=None)
@@ -527,7 +538,7 @@ class ChatClient:
                 for blk in d.replaces:
                     new_norm = self._norm_newlines(blk.new).rstrip("\n")
                     new_lines = ([] if new_norm == "" else new_norm.split("\n"))
-                    span = self._find_unique_anchor_span(lines, blk.x, blk.y, hint_lines=new_lines, single=blk.single)
+                    span = self._find_unique_anchor_span(lines, blk.x, blk.y, hint_lines=new_lines, single=blk.single, occ=blk.occ)
                     if not span: raise RuntimeError("Could not uniquely match Replace anchors (X/Y) in file")
                     a, b = span
                     i0, i1 = ((a - 1, b) if blk.op == "replace" else ((b, b) if blk.op == "insert_after" else (a - 1, a - 1)))

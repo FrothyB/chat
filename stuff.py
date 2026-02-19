@@ -42,7 +42,7 @@ Rules:
 The command can be "Replace", "Insert Before" or "Insert After";
 Target can be `X` (single line) or `X`-`Y` (range);
 Place full original line contents into X and Y;
-Ensure X is always unique (Y is easier to match);
+If X is not unique, denote the Nth occurence using `X` N or `X` N-`Y`;
 There can be multiple commands per Edit with non-overlapping line ranges in any order;
 Replacement ranges should be surgical, minimal, and devoid of unchanged code blocks;
 Ensure that new code slots in correctly, paying attention to start-end lines and indentation;
