@@ -1,48 +1,91 @@
 # AI Chat
 
-An exceptionally fast, developer-centric AI interface featuring deep file integration, web scraping, and surgical AI-driven code modifications.
+Fast, developer-first AI chat UI with streaming, file/URL attachments, and safe, atomic code edits.
 
-## Quick Start
+## Quick start
 
-1.  **Requirements**: Python 3.10+, `OPENROUTER_API_KEY` environment variable.
-2.  **Install**: `pip install -U nicegui httpx openai beautifulsoup4 playwright`
-3.  **Setup Playwright** (for JS-heavy sites): `playwright install chromium`
-4.  **Launch**: `python app5.py --port 8080`
+1. **Requirements**
+   - Python `3.10+`
+   - `OPENROUTER_API_KEY` set in your environment
 
-## Core Capabilities
+2. **Install**
+   ```bash
+   pip install -U nicegui httpx openai beautifulsoup4 playwright
+   ```
 
--   **Advanced Streaming**: High-performance UI with adaptive rendering and real-time response timers.
--   **Context Injection**: Attach local files or scrape web URLs directly into the conversation.
--   **Surgical Edits**: Apply AI-suggested changes using a robust `REPLACE X-Y` line-range system.
--   **Safety First**: Atomic file writes with one-click "Reject" (rollback) and "Undo" (revert edits + message).
--   **Reasoning Control**: Toggle model reasoning effort (none to high) for complex problem solving.
--   **Persistence**: Per-tab state management ensures your context survives refreshes or disconnects.
+3. **Optional (for JS-heavy sites / 403 fallback)**
+   ```bash
+   playwright install chromium
+   ```
 
-## Workflow
+4. **Run**
+   ```bash
+   python chat/app5.py --port 8080
+   ```
 
-### Context Management
--   **Search**: Type 2+ chars in the search bar to find local files. Use arrows to navigate, Enter to attach.
--   **Globs**: Use `*` or `?` (e.g., `src/**/*.py`) and press Enter to batch-attach matching files.
--   **Web**: Paste a URL to scrape its content into Markdown. Uses Playwright for 403-bypass if needed.
--   **Line Numbers**: Files are automatically attached with line numbers to facilitate precise editing.
+The app runs with HTTPS if `cert.pem` and `key.pem` are present (clipboard works best on HTTPS/localhost).
 
-### AI-Driven Editing
-The system uses a specific protocol for modifications:
-1.  Ask the AI to "edit" or "rewrite" a file.
-2.  The AI responds with `### EDIT <path>` and `#### REPLACE X-Y` blocks.
-3.  **Preview**: The app dynamically renders the "original" code inside the AI's response for immediate verification.
-4.  **Apply**: Click "Apply edits" to execute changes.
-5.  **Revert**: Use "Reject" on a specific file bubble or "Back" to undo the entire transaction.
+---
 
-### Interface Controls
--   **Mode (chat/extract)**: `extract` appends a prompt for structured data output.
--   **Stop**: Immediately halts an active stream and finalizes the buffer.
--   **Back**: Reverts the last exchange and any associated file modifications.
--   **Clear**: Resets the entire session state.
--   **Copy**: Integrated copy buttons on all code blocks (requires HTTPS/localhost for clipboard API).
+## What it does
 
-## Configuration
+- **Token streaming UI** with adaptive markdown rendering and response timer
+- **Attach local files** via fuzzy search / wildcard patterns
+- **Attach URLs** by scraping page content into markdown-like text context
+- **Model + reasoning selection** per session
+- **AI-proposed file edits** with explicit apply step
+- **Atomic writes + rollback**
+  - Per-file **Reject** button
+  - Full-turn **Back** undo (message + edits)
+- **Persistent tab state** across refresh/reconnect
 
--   **SSL**: Place `cert.pem` and `key.pem` in the root to enable HTTPS (recommended for clipboard support).
--   **Headless**: Set `AI_CHAT_PLAYWRIGHT_HEADLESS=1` to hide the browser during scraping.
--   **Cache**: Web content is cached at `~/.cache/ai-chat/web`.
+---
+
+## Main workflow
+
+### 1) Add context
+Use the top search input:
+
+- Type at least 2 chars to search files
+- Use arrow keys + Enter to select
+- Use wildcards (`*`, `?`) then Enter to attach many
+- Paste a URL and press Enter to attach fetched page content
+
+### 2) Chat or edit
+Choose mode:
+
+- `chat+edit`: normal chat, but strongly edit-oriented
+- `chat`: plain chat
+- `extract`: app appends an extraction add-on to your message
+
+### 3) Apply edits
+When the assistant returns edit directives, the app can show **Apply edits**.
+
+Supported operations are parsed from assistant markdown sections like:
+
+- `### EDIT <filepath>`
+- `#### Replace \`X\`-\`Y\`` (or single-anchor form)
+- `#### Insert After ...`
+- `#### Insert Before ...`
+- fenced replacement payloads
+
+Edits are anchor-matched against the current file content, then applied atomically.
+
+---
+
+## Controls
+
+- **Back**: undo last user+assistant turn and revert edits from that assistant response
+- **Stop**: stop active stream and finalize current partial text
+- **Clear**: reset session state
+- **Reject** (on edit result bubble): rollback that specific edited file
+- **Copy buttons**: available on assistant/user bubbles and code blocks
+
+---
+
+## Notes
+
+- Paths are treated as project-relative and constrained to the app base directory.
+- File edits are intentionally strict and fail when anchors are ambiguous.
+- For Playwright scraping visibility, set:
+  - `AI_CHAT_PLAYWRIGHT_HEADLESS=1` for headless mode

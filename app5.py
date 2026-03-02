@@ -495,12 +495,9 @@ async def main_page():
         mode = mode_select.value
 
         urls = s.get('url_attachments') or []
-        url_blob = '\n\n'.join((x.get('content') or '').rstrip() for x in urls if (x.get('content') or '').strip())
+        attachments = ([{'kind': 'file', 'path': p} for p in (s['chat'].files or [])] + [{'kind': 'url', 'url': (x.get('url') or ''), 'content': (x.get('content') or '')} for x in urls])
 
         user_display = f"{note}\n\n{msg}" if note else msg
-        if url_blob:
-            user_display += f"\n\nAttached URLs:\n{url_blob}"
-
         show_message('user', user_display)
         to_send = f"{user_display}\n\n{EXTRACT_ADD_ON}" if mode == 'extract' else user_display
 
@@ -513,7 +510,7 @@ async def main_page():
         if timer: asyncio.create_task(run_timer(timer, s))
 
         reset_stream_state()
-        stream = s['chat'].stream_message(to_send, model_select.value, reasoning_select.value, force_edit=(mode == 'chat+edit'))
+        stream = s['chat'].stream_message(to_send, model_select.value, reasoning_select.value, force_edit=(mode == 'chat+edit'), attachments=attachments)
         s['stream'] = stream
 
         async def producer():
@@ -592,9 +589,10 @@ async def main_page():
         ui.notify('Chat cleared', type='positive')
 
     def undo():
-        msg, _ = s['chat'].undo_last()
-        if msg:
+        msg, _, atts = s['chat'].undo_last()
+        if msg is not None:
             clear_edit_round_state()
+            s['url_attachments'] = [{'url': (a.get('url') or ''), 'content': (a.get('content') or '')} for a in (atts or []) if (a.get('kind') or '').lower() == 'url' and (a.get('url') or '').strip()]
             s['draft'] = msg
             input_field.value = msg
             refresh_ui()

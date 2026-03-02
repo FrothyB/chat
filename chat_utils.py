@@ -18,6 +18,7 @@ REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "hi
 
 FILE_LIKE_EXTS = {".py", ".pyw", ".ipynb", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".go", ".rs", ".cs", ".java", ".html", ".htm", ".css", ".md", ".markdown", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml", ".sql", ".sh", ".bash", ".zsh", ".bat", ".ps1"}
 REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS = 2
+ATTACHMENTS_MARKER = "\n\nAttached attachments:\n"
 
 def search_files(query: str, base_path: Optional[str] = None, max_results: int = 20) -> List[str]:
     if not query or len(query) < 2: return []
@@ -173,6 +174,7 @@ class ChatClient:
         self._edit_prompt_injected = False
         self.files: List[str] = []
         self.message_files: Dict[int, List[str]] = {}
+        self.message_attachments: Dict[int, List[Dict[str, str]]] = {}
         self.edited_files: Dict[str, bool] = {}
         self.edit_transactions: List[Dict] = []
         self._last_assistant_index: Optional[int] = None
@@ -188,6 +190,12 @@ class ChatClient:
 
     @staticmethod
     def _canon_line(s: str) -> str: return (s or "").strip()
+    @staticmethod
+    def _strip_hidden_attachments(s: str) -> str:
+        t = s or ""
+        for m in (ATTACHMENTS_MARKER, "\n\nAttached files:", "\n\nAttached files:\n"):
+            if m in t: t = t.split(m, 1)[0]
+        return t
 
     def _strip_injected_prompts(self, s: str) -> str:
         s = s or ""
@@ -205,9 +213,12 @@ class ChatClient:
             if chat and edit: break
         self._chat_prompt_injected, self._edit_prompt_injected = chat, edit
 
-    async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = DEFAULT_REASONING, force_edit: bool = False) -> AsyncGenerator[Union[str, ReasoningEvent], None]:
-        msg_index = len(self.messages)
-        if self.files: self.message_files[msg_index] = self.files.copy()
+    async def stream_message(self, user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = DEFAULT_REASONING, force_edit: bool = False, attachments: Optional[List[Dict[str, str]]] = None) -> AsyncGenerator[Union[str, ReasoningEvent], None]:
+        msg_index, atts = len(self.messages), [a for a in (attachments or []) if isinstance(a, dict)]
+        files = [((a.get("path") or "").strip().replace("\\", "/")) for a in atts if (a.get("kind") or "").lower() == "file" and (a.get("path") or "").strip()]
+        files = list(dict.fromkeys(files))
+        if files: self.message_files[msg_index] = files.copy()
+        if atts: self.message_attachments[msg_index] = [dict(a) for a in atts]
 
         prefix = ""
         if not self._chat_prompt_injected: prefix, self._chat_prompt_injected = prefix + CHAT_PROMPT, True
@@ -215,7 +226,14 @@ class ChatClient:
         if want_edit and not self._edit_prompt_injected: prefix, self._edit_prompt_injected = prefix + EDIT_PROMPT, True
         if prefix: user_msg = f"{prefix}\n\n{user_msg}"
 
-        content = user_msg + (f"\n\nAttached files:\n{read_files(self.files)}" if self.files else "")
+        blocks = [read_files(files).strip()] if files else []
+        for a in atts:
+            if (a.get("kind") or "").lower() == "file": continue
+            c = (a.get("content") or "").strip()
+            if c: blocks.append(c)
+        payload = "\n\n".join(x for x in blocks if x)
+        content = user_msg + (f"{ATTACHMENTS_MARKER}{payload}\n" if payload else "")
+
         self.messages.append({"role": "user", "content": content})
         self.files = []
 
@@ -661,8 +679,8 @@ class ChatClient:
             for path in t.get("changed", set()): current[path] = True
         self.edited_files = current
 
-    def undo_last(self) -> Tuple[Optional[str], List[str]]:
-        if len(self.messages) < 3 or self.messages[-1]["role"] != "assistant": return None, []
+    def undo_last(self) -> Tuple[Optional[str], List[str], List[Dict[str, str]]]:
+        if len(self.messages) < 3 or self.messages[-1]["role"] != "assistant": return None, [], []
         ai = len(self.messages) - 1
         self.rollback_edits_for_assistant(ai)
         self._display_overrides.pop(ai, None)
@@ -671,24 +689,22 @@ class ChatClient:
         for i in range(len(self.messages) - 1, -1, -1):
             if self.messages[i]["role"] == "user":
                 content = self.messages.pop(i)["content"]
-                files = self.message_files.pop(i, [])
+                atts = self.message_attachments.pop(i, [])
+                files = self.message_files.pop(i, [((a.get("path") or "").strip().replace("\\", "/")) for a in atts if (a.get("kind") or "").lower() == "file" and (a.get("path") or "").strip()])
                 self.files = files.copy()
-                user_msg = content.split("\n\nAttached files:")[0] if "\n\nAttached files:" in content else content
-                if EXTRACT_ADD_ON in user_msg: user_msg = user_msg.split(EXTRACT_ADD_ON, 1)[0].rstrip()
-                user_msg = self._strip_injected_prompts(user_msg)
+                user_msg = self._strip_injected_prompts(self._strip_hidden_attachments(content))
                 self._recompute_prompt_flags()
-                return user_msg, files
+                return user_msg, files, atts
 
         self._recompute_prompt_flags()
-        return None, []
+        return None, [], []
 
     def get_display_messages(self) -> List[Tuple[str, str]]:
         out = []
         for idx, m in enumerate(self.messages[1:], start=1):
             role, content = m.get("role"), m.get("content") or ""
             if role == "user":
-                content = content.split("\n\nAttached files:")[0] if "\n\nAttached files:" in content else content
-                content = self._strip_injected_prompts(content)
+                content = self._strip_injected_prompts(self._strip_hidden_attachments(content))
             elif role == "assistant":
                 content = self._display_overrides.get(idx, content)
             out.append((role, content))
