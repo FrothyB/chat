@@ -1,4 +1,5 @@
 import os, json, asyncio, contextlib, re, tempfile
+from bisect import bisect_left
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set, AsyncGenerator, Union
 from dataclasses import dataclass, field
@@ -10,9 +11,9 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1"
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-DEFAULT_MODEL = "openai/gpt-5.2"
+DEFAULT_MODEL = "openai/gpt-5.3-codex"
 DEFAULT_REASONING = "medium"
-MODELS = ["google/gemini-3-flash-preview", "openai/gpt-5.2", "openai/gpt-5.2-pro", "anthropic/claude-4.6-opus", "openai/gpt-oss-120b"]
+MODELS = ["google/gemini-3.1-pro-preview", "openai/gpt-5.3-codex", "openai/gpt-5.2-pro", "anthropic/claude-4.6-opus", "openai/gpt-oss-120b"]
 REASONING_LEVELS = {"none": 0, "minimal": 1024, "low": 2048, "medium": 4096, "high": 16384}
 
 FILE_LIKE_EXTS = {".py", ".pyw", ".ipynb", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".go", ".rs", ".cs", ".java", ".html", ".htm", ".css", ".md", ".markdown", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml", ".sql", ".sh", ".bash", ".zsh", ".bat", ".ps1"}
@@ -28,7 +29,13 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
 
     q = (query or "").strip().replace("\\", "/")
     if not q: return []
-    toks = [t for t in re.split(r"\s+", q) if t]
+    q0 = (os.path.expanduser(q) if q.startswith("~") else q)
+
+    with contextlib.suppress(Exception):
+        cand = (Path(q0).resolve() if q0.startswith("/") else (base / Path(q0)).resolve())
+        if cand.is_file() and cand.is_relative_to(base): return [cand.relative_to(base).as_posix()]
+
+    toks = [t for t in re.split(r"\s+", q0) if t]
     if not toks: return []
 
     def to_regex(pat: str) -> re.Pattern:
@@ -42,11 +49,35 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
     patterns, terms = [], []
     for t in toks: (patterns if any(ch in t for ch in ("*", "?")) else terms).append(t)
 
-    def ok_common(item: Path, rel: str) -> bool:
-        return not any(p.startswith(".") for p in Path(rel).parts) and item.suffix.lower() in FILE_LIKE_EXTS
+    def ok_hidden(rel: str) -> bool: return not any(p.startswith(".") for p in Path(rel).parts)
+    def ok_file(item: Path, rel: str) -> bool: return ok_hidden(rel) and item.suffix.lower() in FILE_LIKE_EXTS
+    def ok_dir(item: Path, rel: str) -> bool: return ok_hidden(rel)
+
+    def scan(want_dir: bool, strict_name: bool, pats: Optional[List[Tuple[re.Pattern, bool]]] = None, tset: Optional[List[str]] = None) -> List[str]:
+        results: List[str] = []
+        with contextlib.suppress(Exception):
+            for item in base.rglob("*"):
+                if len(results) >= max_results: break
+                if want_dir and not item.is_dir(): continue
+                if not want_dir and not item.is_file(): continue
+                rel = rel_of(item)
+                if not rel: continue
+                if want_dir and not ok_dir(item, rel): continue
+                if not want_dir and not ok_file(item, rel): continue
+                name, rell = item.name.lower(), rel.lower()
+
+                if pats:
+                    if any(not rx.match(item.name if on_name else rel) for rx, on_name in pats): continue
+                    if tset and any(t not in rell for t in tset): continue
+                else:
+                    if not all(t in rell for t in terms_l): continue
+                    if strict_name and not any(t in name for t in terms_l): continue
+
+                results.append(rel + ("/" if want_dir else ""))
+        return results
 
     if patterns:
-        pats = []
+        pats: List[Tuple[re.Pattern, bool]] = []
         for pat in patterns:
             pat = os.path.expanduser(pat) if pat.startswith("~") else pat
             if pat.startswith("/"):
@@ -54,41 +85,16 @@ def search_files(query: str, base_path: Optional[str] = None, max_results: int =
                 except Exception: return []
             pats.append((to_regex(pat), "/" not in pat))
         tset = [t.lower() for t in terms]
-        results: List[str] = []
-        with contextlib.suppress(Exception):
-            for item in base.rglob("*"):
-                if len(results) >= max_results: break
-                if not item.is_file(): continue
-                rel = rel_of(item)
-                if not rel or not ok_common(item, rel): continue
-                if any(not rx.match(item.name if on_name else rel) for rx, on_name in pats): continue
-                rell = rel.lower()
-                if any(t not in rell for t in tset): continue
-                results.append(rel)
-        return sorted(set(results))[:max_results]
+        files = scan(False, False, pats=pats, tset=tset)
+        if files: return sorted(set(files))[:max_results]
+        dirs = scan(True, False, pats=pats, tset=tset)
+        return sorted(set(dirs))[:max_results]
 
     terms_l = [t.lower() for t in terms]
-
-    def scan(strict_name: bool) -> List[str]:
-        results: List[str] = []
-        with contextlib.suppress(Exception):
-            for item in base.rglob("*"):
-                if len(results) >= max_results: break
-                if not item.is_file(): continue
-                rel = rel_of(item)
-                if not rel or not ok_common(item, rel): continue
-                rell, name = rel.lower(), item.name.lower()
-                if len(terms_l) == 1:
-                    t = terms_l[0]
-                    if t not in name and t not in rell: continue
-                else:
-                    if not all(t in rell for t in terms_l): continue
-                    if strict_name and not any(t in name for t in terms_l): continue
-                results.append(rel)
-        return results
-
-    results = scan(strict_name=True) or (scan(strict_name=False) if len(terms_l) > 1 else [])
-    return sorted(set(results))[:max_results]
+    files = scan(False, True) or (scan(False, False) if len(terms_l) > 1 else [])
+    if files: return sorted(set(files))[:max_results]
+    dirs = scan(True, True) or (scan(True, False) if len(terms_l) > 1 else [])
+    return sorted(set(dirs))[:max_results]
 
 
 def read_files(file_paths: List[str]) -> str:
@@ -154,9 +160,9 @@ class EditDirective:
 class ChatClient:
     _EDIT_TRIGGER_RE = re.compile(r"\b(?:edit|rewrite)\b", re.IGNORECASE)
     _EDIT_HDR_RE = re.compile(r"(?mi)^\s*###\s*edit\s+(.+?)\s*$")
-    _REPLACE_HDR_RE = re.compile(r"(?mi)^\s*####\s*replace\s+`([^\n`]*)`\s*(?:(\d+)\s*)?(?:-\s*`([^\n`]*)`\s*(?:(\d+)\s*)?)?\s*$")
-    _INSERT_AFTER_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+after\s+`([^\n`]*)`\s*(?:(\d+)\s*)?(?:-\s*`([^\n`]*)`\s*(?:(\d+)\s*)?)?\s*$")
-    _INSERT_BEFORE_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+before\s+`([^\n`]*)`\s*(?:(\d+)\s*)?(?:-\s*`([^\n`]*)`\s*(?:(\d+)\s*)?)?\s*$")
+    _REPLACE_HDR_RE = re.compile(r"(?mi)^\s*####\s*replace\s+`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?(?:-\s*`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?)?\s*$")
+    _INSERT_AFTER_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+after\s+`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?(?:-\s*`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?)?\s*$")
+    _INSERT_BEFORE_HDR_RE = re.compile(r"(?mi)^\s*####\s*insert\s+before\s+`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?(?:-\s*`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?)?\s*$")
     _FENCE_OPEN_RE = re.compile(r"(?m)^\s*```[ \t]*([^\n`]*)\s*$")
     _FENCE_CLOSE_RE = re.compile(r"(?m)^\s*```\s*$")
     _FENCE_ANY_LINE_RE = re.compile(r"(?m)^\s*```")
@@ -172,6 +178,7 @@ class ChatClient:
         self._last_assistant_index: Optional[int] = None
         self._display_overrides: Dict[int, str] = {}
         self._file_cache: Dict[str, Tuple[int, int, List[str]]] = {}
+        self._user_input_prefill = ""
         self.client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=7200, max_retries=20)
 
     def get_completion(self, data): return self.client.chat.completions.create(**data)
@@ -271,67 +278,74 @@ class ChatClient:
     @classmethod
     def _find_unique_anchor_span(cls, lines: List[str], x: str, y: str, hint_lines: Optional[List[str]] = None, single: bool = False, occ: Optional[int] = None) -> Optional[Tuple[int, int]]:
         if not lines: return None
-        a, b = cls._canon_line(x), cls._canon_line(y)
+        def ind(s: str) -> int: return len(s) - len(s.lstrip(" \t"))
+        def blk(s: str) -> bool: return cls._canon_line(s) == ""
 
-        hits_x = [i for i, li in enumerate(lines) if cls._canon_line(li) == a]
-        if occ is not None:
-            if occ < 1 or occ > len(hits_x): return None
-            hits_x = [hits_x[occ - 1]]
-        if single: return (hits_x[0] + 1, hits_x[0] + 1) if len(hits_x) == 1 else None
+        hx_raw, hy_raw = [i for i, l in enumerate(lines) if l == x], [i for i, l in enumerate(lines) if l == y]
+        nx, ny = ((lambda s: s) if hx_raw else cls._canon_line), ((lambda s: s) if hy_raw else cls._canon_line)
+        a, b = nx(x), ny(y)
+        hx = hx_raw or [i for i, l in enumerate(lines) if cls._canon_line(l) == a]
 
-        def indent(s: str) -> int: return len(s) - len((s or "").lstrip(" \t"))
+        if occ is not None: hx = [hx[occ - 1]] if 0 < occ <= len(hx) else []
+        if single: return (hx[0] + 1, hx[0] + 1) if len(hx) == 1 else None
 
-        cands: List[Tuple[int, int]] = []
-        for i in hits_x:
-            for j in range(i, len(lines)):
-                if cls._canon_line(lines[j]) != b: continue
-                cands.append((i, j))
-        if len(cands) == 1: return (cands[0][0] + 1, cands[0][1] + 1)
+        hy = [j for j, l in enumerate(lines) if ny(l) == b]
+        if not hx or not hy: return None
+
+        cands = [(i, j) for i in hx for j in hy[bisect_left(hy, i):]]
+        def ret(c): return (c[0][0] + 1, c[0][1] + 1) if len(c) == 1 else None
         if not cands: return None
+        if r := ret(cands): return r
 
-        picks: List[Tuple[int, int]] = []
+        cands = [(i, j) for i, j in cands if not (j + 1 < len(lines) and ny(lines[j + 1]) == b and ind(lines[j + 1]) == ind(lines[i]))]
+        if r := ret(cands): return r
 
-        def next_content_indent(j: int) -> Optional[int]:
+        nxt_ind, nxt = [None] * len(lines), None
+        for k in range(len(lines) - 1, -1, -1):
+            nxt_ind[k] = nxt
+            if not blk(lines[k]): nxt = ind(lines[k])
+
+        def valid_block(i, j):
+            t0, tj, tn, seen = ind(lines[i]), ind(lines[j]), nxt_ind[j], False
+            if tj != t0 and tn not in (t0, None): return False
+            for k in range(i + 1, j):
+                if blk(lines[k]): continue
+                tk = ind(lines[k])
+                if tk < t0 or (seen and tk <= t0): return False
+                if tk > t0: seen = True
+            return seen
+
+        if r := ret(b_cands := [c for c in cands if valid_block(*c)]): return r
+        cands = b_cands or cands
+
+        if r := ret(f_cands := [(i, j) for i, j in cands if not any(ind(lines[k]) < ind(lines[i]) for k in range(i + 1, j + 1) if not blk(lines[k]))]): return r
+        cands = f_cands or cands
+
+        def next_nonblank_ind(j: int) -> Optional[int]:
             for k in range(j + 1, len(lines)):
-                if cls._canon_line(lines[k]) == "": continue
-                return indent(lines[k])
+                if not blk(lines[k]): return ind(lines[k])
             return None
 
-        for i, j in cands:
-            t0, tj, tn = indent(lines[i]), indent(lines[j]), next_content_indent(j)
-            if tj != t0 and tn != t0: continue
-            seen, ok = False, True
-            for k in range(i + 1, j):
-                if cls._canon_line(lines[k]) == "": continue
-                tk = indent(lines[k])
-                if tk < t0: ok = False; break
-                if not seen:
-                    if tk > t0: seen = True; continue
-                    continue
-                if tk <= t0: ok = False; break
-            if ok and seen: picks.append((i, j))
-            if len(picks) > 1: break
+        if len(cands) > 1:
+            same = [(i, j) for i, j in cands if ind(lines[j]) == ind(lines[i])]
+            if r := ret(same): return r
+            if same: cands = same
+            nxt = [(i, j) for i, j in cands if next_nonblank_ind(j) in (ind(lines[i]), None)]
+            if r := ret(nxt): return r
+            if nxt: cands = nxt
+            if len(cands) > 1 and len({i for i, _ in cands}) == 1: return (cands[0][0] + 1, min(j for _, j in cands) + 1)
 
-        if len(picks) == 1: return (picks[0][0] + 1, picks[0][1] + 1)
-        if len(picks) > 1: cands = picks
+        hint = {cls._canon_line(z) for z in (hint_lines or []) if cls._canon_line(z)}
+        if len(hint) < REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS: return None
 
-        hint = [cls._canon_line(z) for z in (hint_lines or []) if cls._canon_line(z)]
-        if len(set(hint)) < REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS: return None
-        hint_set = set(hint)
+        sets = [{cls._canon_line(z) for z in lines[i:j + 1] if cls._canon_line(z)} & hint for i, j in cands]
+        freq: Dict[str, int] = {}
+        for s in sets:
+            for z in s: freq[z] = freq.get(z, 0) + 1
+        scores = [sum(1 for z in s if freq.get(z) == 1) for s in sets]
 
-        cand_line_sets: List[Set[str]] = []
-        for i, j in cands: cand_line_sets.append({cls._canon_line(z) for z in lines[i:j + 1] if cls._canon_line(z)})
-
-        owners: Dict[str, Set[int]] = {}
-        for idx, s in enumerate(cand_line_sets):
-            for z in (s & hint_set): owners.setdefault(z, set()).add(idx)
-
-        scores = []
-        for idx in range(len(cands)): scores.append(sum(1 for z in hint_set if owners.get(z) == {idx}))
-        best = max(scores) if scores else 0
-        if best < REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS or scores.count(best) != 1: return None
-        i, j = cands[scores.index(best)]
-        return (i + 1, j + 1)
+        best = max(scores, default=0)
+        return (cands[scores.index(best)][0] + 1, cands[scores.index(best)][1] + 1) if best >= REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS and scores.count(best) == 1 else None
 
     def render_for_display(self, md: str) -> str:
         md = md or ""
@@ -406,6 +420,10 @@ class ChatClient:
 
     def set_last_assistant_display(self, display_md: str) -> None:
         if self._last_assistant_index is not None: self._display_overrides[self._last_assistant_index] = display_md or ""
+
+    def consume_user_input_prefill(self) -> str:
+        s, self._user_input_prefill = self._user_input_prefill, ""
+        return s
 
     def parse_edit_markdown(self, md: str) -> List[EditDirective]:
         if not md: return []
@@ -510,6 +528,7 @@ class ChatClient:
         results: List[EditEvent] = []
         ai = (len(self.messages) - 1) if (self.messages and self.messages[-1]["role"] == "assistant") else None
         tx = {"assistant_index": ai, "files": {}, "changed": set()}
+        failed_cmds: List[str] = []
 
         def _abs(rel: str) -> Path: return (BASE_DIR / Path(rel)).resolve()
 
@@ -517,6 +536,12 @@ class ChatClient:
             if rel in tx["files"]: return
             p = _abs(rel)
             tx["files"][rel] = p.read_text(encoding="utf-8") if p.exists() else None
+
+        def _fmt_cmd(rel: str, blk: ReplaceBlock) -> str:
+            op = {"replace": "Replace", "insert_after": "Insert After", "insert_before": "Insert Before"}.get(blk.op, blk.op)
+            core = f"{op} `{blk.x}`" if blk.single else f"{op} `{blk.x}`-`{blk.y}`"
+            if blk.occ: core += f" {blk.occ}"
+            return f"{rel}: {core}"
 
         for d in directives:
             try:
@@ -534,31 +559,42 @@ class ChatClient:
                 lines = norm.split("\n")
                 if had_final_nl: lines = lines[:-1]
 
-                spans: List[Tuple[int, int, List[str], str]] = []
+                spans: List[Tuple[int, int, List[str], str, ReplaceBlock]] = []
+                failed_here: List[ReplaceBlock] = []
                 for blk in d.replaces:
                     new_norm = self._norm_newlines(blk.new).rstrip("\n")
                     new_lines = ([] if new_norm == "" else new_norm.split("\n"))
                     span = self._find_unique_anchor_span(lines, blk.x, blk.y, hint_lines=new_lines, single=blk.single, occ=blk.occ)
-                    if not span: raise RuntimeError("Could not uniquely match Replace anchors (X/Y) in file")
+                    if not span: failed_here.append(blk); continue
                     a, b = span
                     i0, i1 = ((a - 1, b) if blk.op == "replace" else ((b, b) if blk.op == "insert_after" else (a - 1, a - 1)))
-                    spans.append((i0, i1, new_lines, blk.op))
+                    spans.append((i0, i1, new_lines, blk.op, blk))
+
+                if not spans:
+                    for blk in failed_here: failed_cmds.append(_fmt_cmd(rel, blk))
+                    results.append(EditEvent("error", Path(rel).name, "No edit blocks uniquely matched anchors (X/Y) in file", rel))
+                    continue
 
                 spans.sort(key=lambda t: (t[0], t[1]))
-                for (a1, b1, _, _), (a2, b2, _, _) in zip(spans, spans[1:]):
+                for (a1, b1, _, _, _), (a2, b2, _, _, _) in zip(spans, spans[1:]):
                     if a2 < b1: raise RuntimeError(f"Overlapping edit ranges: {a1 + 1}-{b1} and {a2 + 1}-{b2}")
 
                 updated_lines = lines[:]
-                for i0, i1, new_lines, _ in sorted(spans, key=lambda t: (t[0], t[1]), reverse=True): updated_lines[i0:i1] = new_lines
+                for i0, i1, new_lines, _, _ in sorted(spans, key=lambda t: (t[0], t[1]), reverse=True): updated_lines[i0:i1] = new_lines
 
                 updated_norm = ("\n".join(updated_lines) + ("\n" if had_final_nl else ""))
                 updated = updated_norm if eol == "\n" else updated_norm.replace("\n", "\r\n")
-                if updated == original: results.append(EditEvent("error", Path(rel).name, "No changes applied", rel)); continue
+                if updated == original:
+                    for blk in failed_here: failed_cmds.append(_fmt_cmd(rel, blk))
+                    results.append(EditEvent("error", Path(rel).name, "No changes applied", rel))
+                    continue
 
                 _remember_prev(rel)
                 self._atomic_write(p, updated)
                 tx["changed"].add(rel)
-                results.append(EditEvent("complete", Path(rel).name, f"applied {len(spans)} edit(s): {self._count_lines_norm(original)} → {self._count_lines_norm(updated)} lines", rel))
+                for blk in failed_here: failed_cmds.append(_fmt_cmd(rel, blk))
+                extra = f", {len(failed_here)} failed" if failed_here else ""
+                results.append(EditEvent("complete", Path(rel).name, f"applied {len(spans)} edit(s){extra}: {self._count_lines_norm(original)} → {self._count_lines_norm(updated)} lines", rel))
             except Exception as e:
                 results.append(EditEvent("error", Path(d.filename).name, f"Error: {e}", d.filename))
 
@@ -566,6 +602,14 @@ class ChatClient:
             tx["files"] = {p: tx["files"][p] for p in tx["changed"]}
             self.edit_transactions.append(tx)
             for p in tx["changed"]: self.edited_files[p] = True
+
+        if failed_cmds:
+            uniq = []
+            for c in failed_cmds:
+                if c not in uniq: uniq.append(c)
+            lead = "Some edits were applied, but the following commands failed:" if tx["changed"] else "No edits were applied; the following commands failed:"
+            self._user_input_prefill = lead + "\n" + "\n".join(f"- {c}" for c in uniq) + "\n\nPlease generate corrected versions."
+
         return results
 
     def rollback_file(self, file_path: str) -> bool:

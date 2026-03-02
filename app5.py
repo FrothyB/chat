@@ -348,17 +348,18 @@ async def main_page():
                 asyncio.create_task(stream.aclose())
         s.pop('answer_id', None)
 
-    async def apply_edits_from_response(full_text: str):
-        try:
-            events = s['chat'].apply_markdown_edits(full_text)
-            for ev in events or []:
-                key = ev.path or ev.filename
-                if ev.kind == 'complete':
-                    show_edit_bubble(key, 'success', ev.details)
-                elif ev.kind == 'error':
-                    show_edit_bubble(key, 'error', ev.details or '')
-        except Exception as e:
-            ui.notify(f'Edit error: {e}', type='negative')
+    async def apply_edits_from_response(full_text: str) -> str:
+        try: events = s['chat'].apply_markdown_edits(full_text) or []
+        except Exception as e: ui.notify(f'Edit error: {e}', type='negative'); return 'failed'
+        for ev in events:
+            key = ev.path or ev.filename
+            if ev.kind == 'complete': show_edit_bubble(key, 'success', ev.details)
+            elif ev.kind == 'error': show_edit_bubble(key, 'error', ev.details or '')
+        if p := s['chat'].consume_user_input_prefill(): s['draft'] = input_field.value = p; ui.run_javascript('document.getElementById("input-field")?.querySelector("textarea")?.focus()')
+        ok, bad = sum(ev.kind == 'complete' for ev in events), sum(ev.kind == 'error' for ev in events)
+        if ok and (bad or (s.get('draft') or '').startswith(("Some edits were applied", "No edits were applied"))): return 'partial'
+        if ok and not bad: return 'applied'
+        return 'failed'
 
     def show_apply_all_bubble(full_text: str):
         with contextlib.suppress(Exception):
@@ -382,8 +383,8 @@ async def main_page():
                             if b: b.delete()
                         text = s.get('pending_edits_text') or ''
                         s['pending_edits_text'] = None
-                        await apply_edits_from_response(text)
-                        s['last_edit_round_status'] = 'applied'
+                        s['last_edit_round_status'] = await apply_edits_from_response(text)
+
 
                     ui.button('Apply edits', on_click=on_apply).props('flat dense size=sm color=positive').classes('ml-2')
 
@@ -392,10 +393,10 @@ async def main_page():
         note = None
         if before_send and status:
             if status == 'pending': status = 'skipped'
-            if status == 'applied':
-                note = 'I have accepted and implemented your latest round of edits above.'
-            elif status == 'skipped':
-                note = 'I have not accepted or implemented your latest round of edits above.'
+            if status == 'applied': note = 'I have accepted and implemented your latest round of edits above.'
+            elif status == 'partial': note = 'I have applied the uniquely matchable parts of your latest round of edits above; some commands failed.'
+            elif status == 'failed': note = 'I could not apply your latest round of edits above.'
+            elif status == 'skipped': note = 'I have not accepted or implemented your latest round of edits above.'
         s['last_edit_round_status'] = None
         s['pending_edits_text'] = None
         with contextlib.suppress(Exception):
@@ -744,6 +745,7 @@ async def main_page():
     with ui.element('div').classes('chat-footer'):
         with ui.row().classes('w-full p-3 gap-2'):
             input_field = ui.textarea(placeholder='Type your message...').props(f'{P_PROPS} autogrow input-class="min-h-20 max-h-100" id=input-field').classes('flex-grow text-white').bind_value(app.storage.tab, 'draft')
+            if (p := s['chat'].consume_user_input_prefill()) and not (input_field.value or '').strip(): s['draft'] = input_field.value = p
             input_field.on('keydown', handle_keydown)
             mode_select = ui.select(['chat+edit', 'chat', 'extract'], label='Mode').props(P_PROPS).classes('w-32 text-white').bind_value(app.storage.tab, 'mode')
             with ui.column().classes('gap-2'):
