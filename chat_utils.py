@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
 from openai import AsyncOpenAI
-from stuff import *
+from stuff import CHAT_PROMPT, EDIT_PROMPT, EXTRACT_ADD_ON, STYLE_CSS
 from url_utils import fetch_url_content as _fetch_url_content, looks_like_url as _looks_like_url, normalize_url as _normalize_url
 
 API_KEY = os.getenv('OPENROUTER_API_KEY')
@@ -13,8 +13,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_MODEL = 'openai/gpt-5.3-codex'
 DEFAULT_REASONING = 'medium'
-MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.3-codex', 'openai/gpt-5.2-pro', 'anthropic/claude-4.6-opus', 'openai/gpt-oss-120b']
-REASONING_LEVELS = {'none': 0, 'minimal': 1024, 'low': 2048, 'medium': 4096, 'high': 16384}
+MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.3-codex', 'openai/gpt-5.2-pro', 'anthropic/claude-4.6-opus', 'qwen/qwen3.5-35b-a3b']
+REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high']
 
 FILE_LIKE_EXTS = {'.py', '.pyw', '.ipynb', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.go', '.rs', '.cs', '.java', '.html', '.htm', '.css', '.md', '.markdown', '.txt', '.rst', '.json', '.yaml', '.yml', '.toml', '.sql', '.sh', '.bash', '.zsh', '.bat', '.ps1'}
 REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS = 2
@@ -52,6 +52,7 @@ class EditDirective:
     filename: str
     explanation: str = ''
     replaces: List[ReplaceBlock] = field(default_factory=list)
+    full_new: Optional[str] = None
 
 
 class AttachmentService:
@@ -337,19 +338,24 @@ class EditService:
             start, end = m.end(), (edits[i + 1].start() if i + 1 < len(edits) else len(text))
             section = text[start:end].strip()
 
-            replaces, pos = [], 0
+            replaces, pos, full_new = [], 0, None
             while True:
                 op, hdr = self._next_hdr(section, pos)
                 if not hdr: break
                 f = self._parse_fence_from(section, hdr.end())
-                if not f: break
+                if not f:
+                    pos = hdr.end()
+                    continue
                 x, y, single, n, _ = self._parse_header_match(op or 'replace', hdr)
                 replaces.append(ReplaceBlock(x=x, y=y, single=single, occ=n, new=f[1], lang=(f[0] or '').strip(), op=op or 'replace'))
                 pos = f[2]
 
+            has_cmd = any(rx.search(section) for _, rx, _ in self._HEADER_SPECS)
+            if not replaces and not has_cmd and (f := self._parse_fence_from(section, 0)): full_new = f[1]
+
             cuts = [x.start() for x in [self._REPLACE_HDR_RE.search(section), self._INSERT_AFTER_HDR_RE.search(section), self._INSERT_BEFORE_HDR_RE.search(section), self._FENCE_OPEN_RE.search(section)] if x]
             expl = section[:min(cuts)].strip() if cuts else section.strip()
-            if replaces: out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces))
+            if replaces or full_new is not None: out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces, full_new=full_new))
 
         return out
 
@@ -419,7 +425,7 @@ class EditService:
 
     def apply_markdown_edits(self, md: str, assistant_index: Optional[int], ctx_files: List[str]) -> Tuple[List[EditEvent], str]:
         directives = self.parse_edit_markdown(md)
-        if not directives: return [], []
+        if not directives: return [], ''
         results, failed_cmds = [], []
         tx = {'assistant_index': assistant_index, 'files': {}, 'changed': set()}
 
@@ -439,15 +445,30 @@ class EditService:
 
         for d in directives:
             try:
-                rel = self._resolve_path(d.filename, ctx_files=ctx_files, create_if_missing=False)
+                full_edit = d.full_new is not None and not d.replaces
+                rel = self._resolve_path(d.filename, ctx_files=ctx_files, create_if_missing=full_edit)
                 if not rel:
-                    results.append(EditEvent('error', Path(d.filename).name, 'Invalid path (must exist, relative to base dir)', d.filename))
+                    results.append(EditEvent('error', Path(d.filename).name, 'Invalid path (must be relative to base dir)', d.filename))
                     continue
 
                 p = _abs(rel)
                 if not p.is_relative_to(self.base_dir):
                     results.append(EditEvent('error', Path(rel).name, 'Path escapes base dir', rel))
                     continue
+
+                if full_edit:
+                    original = p.read_text(encoding='utf-8') if p.exists() else None
+                    updated_norm = self._norm_newlines(d.full_new or '')
+                    updated = updated_norm if (original is None or '\r\n' not in original) else updated_norm.replace('\n', '\r\n')
+                    if original is not None and updated == original:
+                        results.append(EditEvent('error', Path(rel).name, 'No changes applied', rel))
+                        continue
+                    remember_prev(rel)
+                    self._atomic_write(p, updated)
+                    tx['changed'].add(rel)
+                    results.append(EditEvent('complete', Path(rel).name, f'full rewrite: {self._count_lines_norm(original or "")} → {self._count_lines_norm(updated)} lines', rel))
+                    continue
+
                 if not p.exists():
                     results.append(EditEvent('error', Path(rel).name, 'File does not exist', rel))
                     continue
@@ -501,8 +522,8 @@ class EditService:
                 self._atomic_write(p, updated)
                 tx['changed'].add(rel)
                 for blk in failed_here: failed_cmds.append(fmt_cmd(rel, blk))
-                extra = f', {len(failed_here)} failed' if failed_here else ''
-                results.append(EditEvent('complete', Path(rel).name, f'applied {len(spans)} edit(s){extra}: {self._count_lines_norm(original)} → {self._count_lines_norm(updated)} lines', rel))
+                kind, extra = ('partial' if failed_here else 'complete'), (f', {len(failed_here)} failed' if failed_here else '')
+                results.append(EditEvent(kind, Path(rel).name, f'applied {len(spans)} edit(s){extra}: {self._count_lines_norm(original)} → {self._count_lines_norm(updated)} lines', rel))
             except Exception as e:
                 results.append(EditEvent('error', Path(d.filename).name, f'Error: {e}', d.filename))
 

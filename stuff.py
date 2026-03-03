@@ -29,7 +29,7 @@ Markdown tables and mermaid diagrams when appropriate, with quotes for mermaid l
 
 Finally, as you prepare your answer, ensure that it adheres to all the instructions and guidelines above.'''
 
-EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections exactly as follows:
+EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections:
 
 ### Edit <filepath>
 <Detailed overview of file-level changes>
@@ -39,8 +39,9 @@ EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections exact
 
 Rules:
 The command can be "Replace", "Insert Before" or "Insert After";
-Target can be `X` (single line) or `X`-`Y` (range);
-Place the full original (unmodified) contents of a single line into X and Y, including leading whitespace;
+Targets can take one of two forms: `X` (single line) or `X`-`Y` (range);
+X (and Y where applicable) must contain the full original unmodified contents of exactly one line, including leading whitespace;
+Matching is purely textual and for a single line;
 If X is not unique, denote its Nth occurence using `X` N or `X` N-`Y`;
 If Y is not unique, the first matching occurence will be used;
 There can be multiple commands per Edit with non-overlapping line ranges in any order;
