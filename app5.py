@@ -257,29 +257,42 @@ async def main_page():
                         ui.label(f'{name}: {info or "Failed"}').classes('text-red-300 text-sm')
 
     async def apply_pending_edits():
-        text = state.pending_edits_text or ''
+        text = (state.pending_edits_text or '').rstrip()
         state.pending_edits_text, state.phase = None, 'idle'
-        refs.apply_bubble = None
+        bubble, refs.apply_bubble = refs.apply_bubble, None
+        with contextlib.suppress(Exception):
+            if bubble: bubble.delete()
+
+        raw = text
+        with contextlib.suppress(Exception):
+            if chat.messages and chat.messages[-1].get('role') == 'assistant': raw = (chat.messages[-1].get('content') or '').rstrip() or raw
+        with contextlib.suppress(Exception):
+            if raw:
+                chat.ensure_last_assistant_nonempty(raw)
+                chat.set_last_assistant_display(chat.render_for_display(raw))
 
         try:
             events = chat.apply_markdown_edits(text) or []
         except Exception as e:
             state.last_edit_status = 'failed'
-            render_all()
+            state.edit_history.append({'path': '', 'status': 'error', 'info': str(e)})
+            render_edit_chip(state.edit_history[-1])
+            update_controls()
             ui.notify(f'Edit error: {e}', type='negative')
             return
 
         for ev in events:
-            if ev.kind in {'complete', 'error'}:
-                state.edit_history.append({'path': ev.path or ev.filename, 'status': 'success' if ev.kind == 'complete' else 'error', 'info': ev.details or ''})
+            if ev.kind not in {'complete', 'error'}: continue
+            item = {'path': ev.path or ev.filename, 'status': 'success' if ev.kind == 'complete' else 'error', 'info': ev.details or ''}
+            state.edit_history.append(item)
+            render_edit_chip(item)
 
         ok, bad = sum(ev.kind == 'complete' for ev in events), sum(ev.kind == 'error' for ev in events)
         state.last_edit_status = 'applied' if ok and not bad else 'partial' if ok and bad else 'failed'
         if p := chat.consume_user_input_prefill():
-            state.draft = p
-            refs.input_field.value = p
+            state.draft, refs.input_field.value = p, p
             focus_input()
-        render_all()
+        update_controls()
 
     def render_apply_bubble():
         with refs.container:
