@@ -264,7 +264,7 @@ class EditService:
             if single: return (hx[0] + 1, hx[0] + 1) if len(hx) == 1 else None
 
             hy = [i for i, v in enumerate(vals) if v == yv]
-            cands = [(i, j) for i in hx for j in hy if j >= i]
+            cands = [(i, next((j for j in hy if j >= i), -1)) for i in hx]; cands = [(i, j) for i, j in cands if j >= 0]
             if not cands: return None
             if len(cands) == 1: return cands[0][0] + 1, cands[0][1] + 1
             if occ is not None: return None
@@ -745,7 +745,7 @@ class ChatClient:
         for idx, m in enumerate(self.messages[1:], start=1):
             role, content = m.get('role'), m.get('content') or ''
             if role == 'user': content = self._strip_injected_prompts(self._strip_hidden_attachments(content))
-            elif role == 'assistant': content = self._display_overrides.get(idx) or content
+            elif role == 'assistant': o = self._display_overrides.get(idx); content = o if isinstance(o, str) and o.strip() else content
             atts = [dict(a) for a in (self.message_attachments.get(idx, []) or [])] if role == 'user' else []
             out.append((role, content, atts))
         return out

@@ -89,7 +89,9 @@ class UiState:
     url_attachments: list[dict[str, str]] = field(default_factory=list)
     pending_edits_text: str | None = None
     last_edit_status: str | None = None
-    edit_history: list[dict[str, str]] = field(default_factory=list)
+    pending_edit_assistant: int | None = None
+    pending_edit_targets: list[str] = field(default_factory=list)
+    edit_rounds: dict[int, dict[str, Any]] = field(default_factory=dict)
     search_results: list[str] = field(default_factory=list)
     search_idx: int = -1
     msg_counter: int = 0
@@ -115,10 +117,10 @@ class UiRefs:
     answer_md: Any = None
     answer_id: str = ''
     timer_label: Any = None
-    apply_bubble: Any = None
     stop_btn: Any = None
     back_btn: Any = None
     send_btn: Any = None
+    assistant_edit_slots: dict[int, Any] = field(default_factory=dict)
 
 
 def with_temp_code_fence(text: str) -> str:
@@ -166,9 +168,68 @@ async def main_page():
     def clear_search_results():
         state.search_results, state.search_idx = [], -1
         if refs.file_results_container: refs.file_results_container.clear()
+    def edit_targets(text: str) -> list[str]:
+        out = []
+        for d in chat.parse_edit_markdown(text or '') or []:
+            raw = (d.filename or '').strip().replace('\\', '/')
+            name = Path(raw).name or raw
+            if name and name not in out: out.append(name)
+        return out
 
-    def build_tools(target_id: str, get_text, with_timer: bool = False, atts: list[dict[str, str]] | None = None):
-        tools, timer = ui.element('div').classes('answer-tools flex items-center gap-2').props(f'id={target_id}-tools'), None
+    def set_pending_edits(text: str, assistant_index: int):
+        targets = edit_targets(text) or ['edits']
+        state.pending_edits_text, state.pending_edit_assistant, state.pending_edit_targets = text, assistant_index, targets
+        state.last_edit_status, state.phase = 'pending', 'awaiting_edit_decision'
+        state.edit_rounds[assistant_index] = {'status': 'pending', 'items': [{'label': t, 'status': 'pending'} for t in targets]}
+
+    def clear_pending_edits(reject: bool = False):
+        text, ai = (state.pending_edits_text or '').rstrip(), state.pending_edit_assistant
+        if reject and text and ai is not None:
+            targets = state.pending_edit_targets[:] or edit_targets(text) or ['edits']
+            state.edit_rounds[ai] = {'status': 'error', 'items': [{'label': t, 'status': 'error'} for t in targets]}
+            state.last_edit_status = 'rejected'
+        state.pending_edits_text, state.pending_edit_assistant, state.pending_edit_targets = None, None, []
+        if state.phase == 'awaiting_edit_decision': state.phase = 'idle'
+
+    def edit_round_meta(status: str) -> tuple[str, str, str]:
+        if status == 'pending': return 'tips_and_updates', 'text-blue-300', 'Edits available'
+        if status == 'success': return 'check_circle', 'text-green-400', 'All edits applied'
+        if status == 'partial': return 'warning', 'text-amber-400', 'Some edits applied'
+        return 'cancel', 'text-red-400', 'Edits not applied'
+
+    def render_edit_round_slot(slot, assistant_index: int):
+        slot.clear()
+        r = state.edit_rounds.get(assistant_index)
+        if not r: return
+        s, items = (r.get('status') or 'error'), (r.get('items') or [])
+        i0, c0, lbl = edit_round_meta(s)
+        with slot:
+            with ui.element('div').classes('tool-att'):
+                ui.icon(i0).classes(c0)
+                ui.label(lbl).classes('tool-att-label text-gray-300')
+                if s == 'pending' and assistant_index == state.pending_edit_assistant:
+                    ui.button('Apply', on_click=lambda i=assistant_index: asyncio.create_task(apply_pending_edits(i))).props('flat dense size=sm color=positive').classes('ml-1')
+            if s != 'pending':
+                for it in items:
+                    ok, name = (it.get('status') == 'success'), (it.get('label') or 'edit')
+                    with ui.element('div').classes('tool-att'):
+                        ui.icon('check' if ok else 'close').classes('text-green-400' if ok else 'text-red-400')
+                        ui.label(name).classes('tool-att-label text-gray-300')
+
+    def refresh_edit_round_slot(assistant_index: int):
+        slot = refs.assistant_edit_slots.get(assistant_index)
+        if not slot:
+            render_all()
+            return
+        # Applying edits from the inline "Apply" button is sensitive to render order in NiceGUI.
+        # A full chat rerender from this callback can transiently blank assistant markdown until a later refresh.
+        # Keep updates scoped to the assistant's edit-status slot here; avoid calling render_all() from apply flow.
+        render_edit_round_slot(slot, assistant_index)
+        with contextlib.suppress(Exception):
+            slot.update()
+
+    def build_tools(target_id: str, get_text, with_timer: bool = False, atts: list[dict[str, str]] | None = None, assistant_index: int | None = None):
+        tools, timer = ui.element('div').classes('answer-tools flex items-center gap-2 flex-wrap').props(f'id={target_id}-tools'), None
         with tools:
             copy_btn = None
 
@@ -187,8 +248,10 @@ async def main_page():
                 with ui.element('div').classes('tool-att'):
                     ui.icon('attach_file' if k == 'file' else 'link').classes('text-gray-400')
                     ui.label(t).classes('tool-att-label text-gray-300')
-
-
+            if assistant_index is not None:
+                slot = ui.element('div').classes('inline-flex items-center gap-2 flex-wrap')
+                refs.assistant_edit_slots[assistant_index] = slot
+                render_edit_round_slot(slot, assistant_index)
             if with_timer: timer = ui.label('0:00').classes('timer')
         return timer
 
@@ -203,7 +266,7 @@ async def main_page():
                 build_tools(uid, get_text=lambda c=content: c, atts=atts)
         scan_code_copy_buttons(uid)
 
-    def render_assistant_message(content: str, streaming: bool = False):
+    def render_assistant_message(content: str, streaming: bool = False, message_index: int | None = None):
         state.answer_counter += 1
         aid = f'answer-{state.answer_counter}'
         with refs.container:
@@ -218,9 +281,9 @@ async def main_page():
                         refs.answer_md, refs.answer_id = None, ''
             with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
                 if streaming:
-                    refs.timer_label = build_tools(aid, get_text=lambda: refs.answer_md.content if refs.answer_md else '', with_timer=True)
+                    refs.timer_label = build_tools(aid, get_text=lambda: refs.answer_md.content if refs.answer_md else '', with_timer=True, assistant_index=message_index)
                 else:
-                    build_tools(aid, get_text=lambda m=md: m.content)
+                    build_tools(aid, get_text=lambda m=md: m.content, assistant_index=message_index)
         if not streaming: scan_code_copy_buttons(aid)
 
     def render_file_chip(path: str):
@@ -241,67 +304,42 @@ async def main_page():
                     ui.label(url).classes('text-purple-200 text-sm')
                     ui.button(icon='close', on_click=lambda u=url: remove_url(u)).props('flat dense size=sm').classes('text-purple-300')
 
-    def render_edit_chip(item: dict[str, str]):
-        path, status, info = item.get('path', ''), item.get('status', 'success'), item.get('info', '')
-        name = Path(path).name if path else 'unknown'
-        with refs.container:
-            with ui.element('div').classes('flex justify-center mb-2'):
-                klass = 'edit-bubble' + (' success' if status == 'success' else ' error' if status == 'error' else '')
-                with ui.element('div').classes(klass):
-                    if status == 'success':
-                        ui.icon('check_circle').classes('text-green-400')
-                        ui.label(f'{name}: {info}').classes('text-green-300 text-sm')
-                        ui.button('Reject', on_click=lambda p=path: reject_edit(p)).props('flat dense size=sm').classes('text-red-400 ml-2')
-                    else:
-                        ui.icon('error').classes('text-red-400')
-                        ui.label(f'{name}: {info or "Failed"}').classes('text-red-300 text-sm')
 
-    async def apply_pending_edits():
-        text = (state.pending_edits_text or '').rstrip()
-        state.pending_edits_text, state.phase = None, 'idle'
-        bubble, refs.apply_bubble = refs.apply_bubble, None
-        with contextlib.suppress(Exception):
-            if bubble: bubble.delete()
+    async def apply_pending_edits(assistant_index: int):
+        if assistant_index != state.pending_edit_assistant or not (state.pending_edits_text or '').strip(): return
+        text, raw = (state.pending_edits_text or '').rstrip(), (state.pending_edits_text or '').rstrip()
+        targets = state.pending_edit_targets[:] or edit_targets(text) or ['edits']
+        state.pending_edits_text, state.pending_edit_assistant, state.pending_edit_targets, state.phase = None, None, [], 'idle'
 
-        raw = text
         with contextlib.suppress(Exception):
             if chat.messages and chat.messages[-1].get('role') == 'assistant': raw = (chat.messages[-1].get('content') or '').rstrip() or raw
-        with contextlib.suppress(Exception):
-            if raw:
-                chat.ensure_last_assistant_nonempty(raw)
-                chat.set_last_assistant_display(chat.render_for_display(raw))
+            if raw: chat.ensure_last_assistant_nonempty(raw)
 
         try:
             events = chat.apply_markdown_edits(text) or []
         except Exception as e:
-            state.last_edit_status = 'failed'
-            state.edit_history.append({'path': '', 'status': 'error', 'info': str(e)})
-            render_edit_chip(state.edit_history[-1])
+            state.edit_rounds[assistant_index], state.last_edit_status = {'status': 'error', 'items': [{'label': t, 'status': 'error'} for t in targets]}, 'failed'
+            refresh_edit_round_slot(assistant_index)
             update_controls()
             ui.notify(f'Edit error: {e}', type='negative')
             return
 
-        for ev in events:
-            if ev.kind not in {'complete', 'error'}: continue
-            item = {'path': ev.path or ev.filename, 'status': 'success' if ev.kind == 'complete' else 'error', 'info': ev.details or ''}
-            state.edit_history.append(item)
-            render_edit_chip(item)
-
-        ok, bad = sum(ev.kind == 'complete' for ev in events), sum(ev.kind == 'error' for ev in events)
-        state.last_edit_status = 'applied' if ok and not bad else 'partial' if ok and bad else 'failed'
+        items = [{'label': Path(ev.path or ev.filename).name or (ev.path or ev.filename or 'edit'), 'status': 'success' if ev.kind == 'complete' else 'error'} for ev in events if ev.kind in {'complete', 'error'}]
+        if not items: items = [{'label': t, 'status': 'error'} for t in targets]
+        merged, order = {}, []
+        for it in items:
+            k, v = it['label'], it['status']
+            if k not in merged: merged[k], order = v, order + [k]
+            elif v == 'error': merged[k] = 'error'
+        items = [{'label': k, 'status': merged[k]} for k in order]
+        ok, bad = sum(it['status'] == 'success' for it in items), sum(it['status'] != 'success' for it in items)
+        status = 'success' if ok and not bad else 'partial' if ok and bad else 'error'
+        state.edit_rounds[assistant_index], state.last_edit_status = {'status': status, 'items': items}, ('applied' if status == 'success' else 'partial' if status == 'partial' else 'failed')
         if p := chat.consume_user_input_prefill():
             state.draft, refs.input_field.value = p, p
             focus_input()
+        refresh_edit_round_slot(assistant_index)
         update_controls()
-
-    def render_apply_bubble():
-        with refs.container:
-            with ui.element('div').classes('flex justify-center mb-2'):
-                refs.apply_bubble = ui.element('div').classes('edit-bubble')
-                with refs.apply_bubble:
-                    ui.icon('tips_and_updates').classes('text-blue-300')
-                    ui.label('Edits available. Apply to all files?').classes('text-blue-200 text-sm')
-                    ui.button('Apply edits', on_click=lambda: asyncio.create_task(apply_pending_edits())).props('flat dense size=sm color=positive').classes('ml-2')
 
     def update_stream_render(force: bool = False):
         if not refs.answer_md:
@@ -316,37 +354,36 @@ async def main_page():
 
     def render_all():
         refs.container.clear()
-        refs.answer_md, refs.answer_id, refs.timer_label, refs.apply_bubble = None, '', None, None
+        refs.answer_md, refs.answer_id, refs.timer_label = None, '', None
+        refs.assistant_edit_slots = {}
         state.msg_counter, state.answer_counter = 0, 0
+        state.edit_rounds = {i: v for i, v in state.edit_rounds.items() if 0 <= i < len(chat.messages)}
 
-        for role, content, atts in chat.get_display_messages():
+        for i, (role, content, atts) in enumerate(chat.get_display_messages(), start=1):
             if role == 'user':
                 render_user_message(content, atts)
             elif role == 'assistant':
-                render_assistant_message(content, streaming=(content == '' and state.phase == 'streaming'))
+                render_assistant_message(content, streaming=(content == '' and state.phase == 'streaming'), message_index=i)
 
-        if state.phase == 'streaming' and not refs.answer_md: render_assistant_message('', streaming=True)
+        if state.phase == 'streaming' and not refs.answer_md: render_assistant_message('', streaming=True, message_index=(len(chat.messages) - 1))
         if state.phase == 'streaming' and state.stream_text: update_stream_render(force=True)
 
         for p in chat.files: render_file_chip(p)
         for item in state.url_attachments: render_url_chip(item)
-        for item in state.edit_history: render_edit_chip(item)
-        if state.phase == 'awaiting_edit_decision' and state.pending_edits_text: render_apply_bubble()
         update_controls()
 
     def clear_edit_round_state(before_send: bool = False) -> str | None:
+        if before_send and state.pending_edits_text: clear_pending_edits(reject=True)
+        elif not before_send: clear_pending_edits(reject=False)
         status, note = state.last_edit_status, None
         if before_send and status:
-            if status == 'pending': status = 'skipped'
             note = {
                 'applied': 'I have accepted and implemented your latest round of edits above.',
                 'partial': 'I have applied the uniquely matchable parts of your latest round of edits above; some commands failed.',
                 'failed': 'I could not apply your latest round of edits above.',
-                'skipped': 'I have not accepted or implemented your latest round of edits above.',
+                'rejected': 'I rejected your latest round of edits above.',
             }.get(status)
-        state.last_edit_status, state.pending_edits_text = None, None
-        if state.phase == 'awaiting_edit_decision': state.phase = 'idle'
-        refs.apply_bubble = None
+        state.last_edit_status = None
         return note
 
     async def run_stream(stream):
@@ -389,7 +426,8 @@ async def main_page():
             return
 
         if chat.parse_edit_markdown(full):
-            state.pending_edits_text, state.last_edit_status, state.phase = full, 'pending', 'awaiting_edit_decision'
+            ai = len(chat.messages) - 1 if chat.messages and chat.messages[-1].get('role') == 'assistant' else None
+            if ai is not None: set_pending_edits(full, ai)
             render_all()
 
     async def send():
@@ -441,13 +479,6 @@ async def main_page():
         render_all()
         ui.notify('Response stopped', type='info')
 
-    def reject_edit(path: str):
-        if chat.rollback_file(path):
-            ui.notify(f'Reverted {Path(path).name}', type='positive')
-            return
-        key = next((p for p in chat.edited_files if Path(p).name == Path(path).name), None)
-        if key and chat.rollback_file(key): ui.notify(f'Reverted {Path(key).name}', type='positive')
-        else: ui.notify('Nothing to revert', type='warning')
 
     def remove_file(path: str):
         with contextlib.suppress(ValueError):
@@ -479,7 +510,7 @@ async def main_page():
         clear_edit_round_state()
         chat = ChatClient()
         storage['chat'] = chat
-        state.url_attachments, state.edit_history = [], []
+        state.url_attachments, state.edit_rounds = [], {}
         state.stream_text, state.stream_task, state.stream_started_at, state.last_render_at = '', None, 0.0, 0.0
         state.stream_done, state.stream_error, state.stream_has_answer = False, None, False
         state.draft, refs.input_field.value = '', ''
