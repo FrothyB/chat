@@ -97,10 +97,14 @@ class UiState:
     stream_text: str = ''
     stream_task: asyncio.Task | None = None
     stream_started_at: float = 0.0
-    last_render_at: float = 0.0
     stream_done: bool = False
     stream_error: str | None = None
     stream_has_answer: bool = False
+    ui_dirty: bool = True
+    render_in_progress: bool = False
+    ui_dirty_during_render: bool = False
+    next_render_allowed_at: float = 0.0
+    last_render_duration: float = 0.0
 
 
 @dataclass(slots=True)
@@ -112,13 +116,10 @@ class UiRefs:
     model_select: Any = None
     reasoning_select: Any = None
     mode_select: Any = None
-    answer_md: Any = None
-    answer_id: str = ''
     timer_label: Any = None
     stop_btn: Any = None
     back_btn: Any = None
     send_btn: Any = None
-    assistant_edit_slots: dict[int, Any] = field(default_factory=dict)
 
 
 def with_temp_code_fence(text: str) -> str:
@@ -134,11 +135,19 @@ async def main_page():
     chat = storage.get('chat') if isinstance(storage.get('chat'), ChatClient) else ChatClient()
     storage['ui_state'], storage['chat'] = state, chat
 
+    # Compatibility for persisted UiState created before newer fields existed.
+    if not hasattr(state, 'ui_dirty'): state.ui_dirty = True
+    if not hasattr(state, 'render_in_progress'): state.render_in_progress = False
+    if not hasattr(state, 'ui_dirty_during_render'): state.ui_dirty_during_render = False
+    if not hasattr(state, 'next_render_allowed_at'): state.next_render_allowed_at = 0.0
+    if not hasattr(state, 'last_render_duration'): state.last_render_duration = 0.0
+
     if state.phase != 'streaming':
         state.stream_task, state.stream_text, state.stream_started_at, state.stream_has_answer = None, '', 0.0, False
     elif state.stream_started_at <= 0:
         state.stream_started_at = time.monotonic()
-    state.last_render_at, state.stream_done, state.stream_error = 0.0, False, None
+    state.stream_done, state.stream_error = False, None
+    state.ui_dirty = True
 
     refs = UiRefs()
     ui.add_head_html(STYLE_CSS)
@@ -162,6 +171,15 @@ async def main_page():
             if refs.stop_btn: refs.stop_btn.set_visibility(state.phase == 'streaming')
             if refs.back_btn: refs.back_btn.set_visibility(state.phase != 'streaming')
             if refs.send_btn: refs.send_btn.set_visibility(state.phase != 'streaming')
+
+    def mark_ui_dirty():
+        state.ui_dirty = True
+        if state.render_in_progress:
+            state.ui_dirty_during_render = True
+
+    def set_draft_text(value: str):
+        state.draft = value
+        refs.input_field.value = value
 
     def clear_search_results():
         state.search_results, state.search_idx = [], -1
@@ -221,18 +239,6 @@ async def main_page():
                         ui.icon(icon).classes(cls)
                         ui.label(name).classes('tool-att-label text-gray-300')
 
-    def refresh_edit_round_slot(assistant_index: int):
-        slot = refs.assistant_edit_slots.get(assistant_index)
-        if not slot:
-            render_all()
-            return
-        # NiceGUI can occasionally skip repainting nested dynamic elements from inline callbacks.
-        # Refresh both the slot and its parent container to avoid requiring a manual page refresh.
-        render_edit_round_slot(slot, assistant_index)
-        with contextlib.suppress(Exception):
-            slot.update()
-            refs.container.update()
-
     def build_tools(target_id: str, get_text, with_timer: bool = False, atts: list[dict[str, str]] | None = None, assistant_index: int | None = None):
         tools, timer = ui.element('div').classes('answer-tools flex items-center gap-2 flex-wrap').props(f'id={target_id}-tools'), None
         with tools:
@@ -255,7 +261,6 @@ async def main_page():
                     ui.label(t).classes('tool-att-label text-gray-300')
             if assistant_index is not None:
                 slot = ui.element('div').classes('inline-flex items-center gap-2 flex-wrap')
-                refs.assistant_edit_slots[assistant_index] = slot
                 render_edit_round_slot(slot, assistant_index)
             if with_timer: timer = ui.label('0:00').classes('timer')
         return timer
@@ -274,22 +279,15 @@ async def main_page():
     def render_assistant_message(content: str, streaming: bool = False, message_index: int | None = None):
         state.answer_counter += 1
         aid = f'answer-{state.answer_counter}'
+        rendered = with_temp_code_fence(chat.render_for_display(content)) if streaming else content
         with refs.container:
             with ui.element('div').classes('flex justify-start mb-3'):
                 with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble').props(f'id={aid}'):
-                    if streaming:
-                        with ui.column().classes('answer-content no-gap'):
-                            refs.answer_md = ui.markdown('', extras=MD_EXTRAS).classes(MD_CLASSES)
-                        refs.answer_id = aid
-                    else:
-                        md = ui.markdown(content, extras=MD_EXTRAS).classes(MD_CLASSES)
-                        refs.answer_md, refs.answer_id = None, ''
+                    md = ui.markdown(rendered, extras=MD_EXTRAS).classes(MD_CLASSES)
             with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
-                if streaming:
-                    refs.timer_label = build_tools(aid, get_text=lambda: refs.answer_md.content if refs.answer_md else '', with_timer=True, assistant_index=message_index)
-                else:
-                    build_tools(aid, get_text=lambda m=md: m.content, assistant_index=message_index)
-        if not streaming: scan_code_copy_buttons(aid)
+                if streaming: refs.timer_label = build_tools(aid, get_text=lambda m=md: m.content, with_timer=True, assistant_index=message_index)
+                else: build_tools(aid, get_text=lambda m=md: m.content, assistant_index=message_index)
+        scan_code_copy_buttons(aid)
 
     def render_file_chip(path: str):
         name = Path(path).name
@@ -324,7 +322,7 @@ async def main_page():
             events = chat.apply_markdown_edits(text) or []
         except Exception as e:
             state.edit_rounds[assistant_index], state.last_edit_status = {'status': 'error', 'items': [{'label': t, 'status': 'error'} for t in targets]}, 'failed'
-            render_all()
+            mark_ui_dirty()
             ui.notify(f'Edit error: {e}', type='negative')
             return
 
@@ -340,42 +338,30 @@ async def main_page():
         n_ok, n_partial, n_err = sum(it['status'] == 'success' for it in items), sum(it['status'] == 'partial' for it in items), sum(it['status'] == 'error' for it in items)
         status = 'error' if n_err and not (n_ok or n_partial) else 'partial' if n_partial or (n_ok and n_err) else 'success'
         state.edit_rounds[assistant_index], state.last_edit_status = {'status': status, 'items': items}, ('applied' if status == 'success' else 'partial' if status == 'partial' else 'failed')
+        mark_ui_dirty()
         if p := chat.consume_user_input_prefill():
-            state.draft, refs.input_field.value = p, p
-            focus_input()
-        render_all()
-
-    def update_stream_render(force: bool = False):
-        if not refs.answer_md:
-            render_all()
-            if not refs.answer_md: return
-        now = time.monotonic()
-        if not force and (now - state.last_render_at) < 0.05: return
-        rendered = with_temp_code_fence(chat.render_for_display(state.stream_text))
-        refs.answer_md.set_content(rendered)
-        state.last_render_at = now
-        scan_code_copy_buttons(refs.answer_id)
+            with contextlib.suppress(Exception):
+                set_draft_text(p)
+                focus_input()
 
     def render_all():
         refs.container.clear()
-        refs.answer_md, refs.answer_id, refs.timer_label = None, '', None
-        refs.assistant_edit_slots = {}
+        refs.timer_label = None
         state.msg_counter, state.answer_counter = 0, 0
 
+        last_assistant_index = len(chat.messages) - 1 if chat.messages and chat.messages[-1].get('role') == 'assistant' else None
         for i, (role, content, atts) in enumerate(chat.get_display_messages(), start=1):
             if role == 'user':
                 render_user_message(content, atts)
             elif role == 'assistant':
-                render_assistant_message(content, streaming=(content == '' and state.phase == 'streaming'), message_index=i)
-
-        if state.phase == 'streaming' and not refs.answer_md: render_assistant_message('', streaming=True, message_index=(len(chat.messages) - 1))
-        if state.phase == 'streaming' and state.stream_text: update_stream_render(force=True)
+                render_assistant_message(content, streaming=(state.phase == 'streaming' and i == last_assistant_index), message_index=i)
 
         for p in chat.files: render_file_chip(p)
         for item in state.url_attachments: render_url_chip(item)
         update_controls()
 
     def clear_edit_round_state(before_send: bool = False) -> str | None:
+        before = (state.pending_edits_text, state.pending_edit_assistant, tuple(state.pending_edit_targets), state.phase, state.last_edit_status, len(state.edit_rounds))
         if before_send and state.pending_edits_text: clear_pending_edits(reject=True)
         elif not before_send: clear_pending_edits(reject=False)
         status, note = state.last_edit_status, None
@@ -387,6 +373,8 @@ async def main_page():
                 'rejected': 'I rejected your latest round of edits above.',
             }.get(status)
         state.last_edit_status = None
+        after = (state.pending_edits_text, state.pending_edit_assistant, tuple(state.pending_edit_targets), state.phase, state.last_edit_status, len(state.edit_rounds))
+        if before != after: mark_ui_dirty()
         return note
 
     async def run_stream(stream):
@@ -395,17 +383,20 @@ async def main_page():
             async for chunk in stream:
                 if isinstance(chunk, ReasoningEvent):
                     if not state.stream_has_answer and chunk.text: state.stream_text += str(chunk.text)
+                    mark_ui_dirty()
                     continue
                 if not isinstance(chunk, str) or not chunk: continue
                 if not state.stream_has_answer:
                     state.stream_text, state.stream_has_answer = '', True
                 state.stream_text += chunk
+                mark_ui_dirty()
         except asyncio.CancelledError:
             return
         except Exception as e:
             err = str(e)
         finally:
             state.stream_error, state.stream_done = err, True
+            mark_ui_dirty()
 
     def persist_stream_output() -> str:
         full = (state.stream_text or '').rstrip() or 'Response stopped.'
@@ -418,17 +409,14 @@ async def main_page():
         state.phase = 'idle'
         state.stream_task = None
         state.stream_started_at = 0.0
-        state.last_render_at = 0.0
         state.stream_text = ''
         state.stream_done = False
         state.stream_error = None
         state.stream_has_answer = False
-    def finalize_stream(err: str | None = None):
+    def finalize_stream_state(err: str | None = None):
         if state.phase != 'streaming': return
         full = persist_stream_output()
         reset_stream_state()
-        render_all()
-
         if err:
             ui.notify(f'Error: {err}', type='negative')
             return
@@ -436,25 +424,7 @@ async def main_page():
         if chat.parse_edit_markdown(full):
             ai = len(chat.messages) - 1 if chat.messages and chat.messages[-1].get('role') == 'assistant' else None
             if ai is not None: set_pending_edits(full, ai)
-            render_all()
-
-        if err:
-            ui.notify(f'Error: {err}', type='negative')
-            return
-
-        if chat.parse_edit_markdown(full):
-            ai = len(chat.messages) - 1 if chat.messages and chat.messages[-1].get('role') == 'assistant' else None
-            if ai is not None: set_pending_edits(full, ai)
-            render_all()
-
-        if err:
-            ui.notify(f'Error: {err}', type='negative')
-            return
-
-        if chat.parse_edit_markdown(full):
-            ai = len(chat.messages) - 1 if chat.messages and chat.messages[-1].get('role') == 'assistant' else None
-            if ai is not None: set_pending_edits(full, ai)
-            render_all()
+        mark_ui_dirty()
 
     async def send():
         msg = (refs.input_field.value or '').strip()
@@ -471,15 +441,14 @@ async def main_page():
         state.stream_text = ''
         state.phase = 'streaming'
         state.stream_started_at = time.monotonic()
-        state.last_render_at = 0.0
         state.stream_done = False
         state.stream_error = None
         state.stream_has_answer = False
-        state.draft, refs.input_field.value = '', ''
+        set_draft_text('')
 
         stream = chat.stream_message(to_send, refs.model_select.value, refs.reasoning_select.value, force_edit=(mode == 'chat+edit'), attachments=attachments)
         prune_edit_rounds()
-        render_all()
+        mark_ui_dirty()
         state.stream_task = asyncio.create_task(run_stream(stream))
 
     def stop_streaming():
@@ -491,7 +460,7 @@ async def main_page():
         if t and not t.done(): t.cancel()
         persist_stream_output()
         reset_stream_state()
-        render_all()
+        mark_ui_dirty()
         ui.notify('Response stopped', type='info')
 
 
@@ -499,12 +468,12 @@ async def main_page():
         with contextlib.suppress(ValueError):
             chat.files.remove(path)
         if state.phase == 'streaming': ui.notify('File removed; changes will reflect after the response finishes.', type='info')
-        else: render_all()
+        else: mark_ui_dirty()
 
     def remove_url(url: str):
         state.url_attachments = [x for x in state.url_attachments if x.get('url') != url]
         if state.phase == 'streaming': ui.notify('URL removed; changes will reflect after the response finishes.', type='info')
-        else: render_all()
+        else: mark_ui_dirty()
 
     def undo():
         if state.phase == 'streaming': stop_streaming()
@@ -515,9 +484,8 @@ async def main_page():
             return
         prune_edit_rounds()
         state.url_attachments = [{'url': (a.get('url') or ''), 'content': (a.get('content') or '')} for a in (atts or []) if (a.get('kind') or '').lower() == 'url' and (a.get('url') or '').strip()]
-        state.draft = msg
-        refs.input_field.value = msg
-        render_all()
+        set_draft_text(msg)
+        mark_ui_dirty()
         focus_input()
 
     def clear_chat():
@@ -527,12 +495,12 @@ async def main_page():
         chat = ChatClient()
         storage['chat'] = chat
         state.url_attachments, state.edit_rounds = [], {}
-        state.stream_text, state.stream_task, state.stream_started_at, state.last_render_at = '', None, 0.0, 0.0
+        state.stream_text, state.stream_task, state.stream_started_at = '', None, 0.0
         state.stream_done, state.stream_error, state.stream_has_answer = False, None, False
-        state.draft, refs.input_field.value = '', ''
+        set_draft_text('')
         clear_search_results()
         prune_edit_rounds()
-        render_all()
+        mark_ui_dirty()
         ui.notify('Chat cleared', type='positive')
 
     def render_search_results():
@@ -554,7 +522,7 @@ async def main_page():
         if path not in chat.files: chat.files.append(path)
         refs.file_search.value = ''
         clear_search_results()
-        render_all()
+        mark_ui_dirty()
         focus_file_search()
 
     def attach_multiple(paths: list[str]):
@@ -562,7 +530,7 @@ async def main_page():
             if p not in chat.files: chat.files.append(p)
         refs.file_search.value = ''
         clear_search_results()
-        render_all()
+        mark_ui_dirty()
         focus_file_search()
 
     async def attach_url(url: str):
@@ -572,7 +540,7 @@ async def main_page():
             if not any(x.get('url') == u for x in state.url_attachments): state.url_attachments.append({'url': u, 'content': content})
             refs.file_search.value = ''
             clear_search_results()
-            render_all()
+            mark_ui_dirty()
             focus_file_search()
         except Exception as e:
             ui.notify(f'URL error: {e}', type='negative')
@@ -625,13 +593,31 @@ async def main_page():
             elapsed = int(time.monotonic() - state.stream_started_at)
             refs.timer_label.text = f'{elapsed // 60}:{(elapsed % 60):02d}'
 
-    def consume_stream():
-        if state.phase != 'streaming': return
-        if state.stream_text: update_stream_render()
-        if not state.stream_done: return
-        err = state.stream_error
-        state.stream_done, state.stream_error = False, None
-        finalize_stream(err)
+    def render_tick():
+        if state.render_in_progress or not state.ui_dirty:
+            return
+        now = time.monotonic()
+        if now < state.next_render_allowed_at:
+            return
+
+        state.render_in_progress = True
+        state.ui_dirty_during_render = False
+        started = now
+        rendered_ok = False
+        try:
+            if state.stream_done:
+                err = state.stream_error
+                state.stream_done, state.stream_error = False, None
+                finalize_stream_state(err)
+            prune_edit_rounds()
+            render_all()
+            rendered_ok = True
+        finally:
+            elapsed = max(0.0, time.monotonic() - started)
+            state.last_render_duration = elapsed
+            state.next_render_allowed_at = time.monotonic() + 0.05 + (0.5 * elapsed)
+            state.render_in_progress = False
+            state.ui_dirty = (not rendered_ok) or state.ui_dirty_during_render
 
     with ui.element('div').classes('fixed-header'):
         with ui.row().classes('gap-4 p-3 w-full'):
@@ -659,13 +645,13 @@ async def main_page():
                 ui.button('Clear', on_click=clear_chat, icon='delete').props('color=grey').classes('ctrl-tile')
 
     ui.timer(1.0, tick_timer)
-    # TODO: consider replacing timer-based stream consumption with direct async UI updates from the stream task.
-    ui.timer(0.05, consume_stream)
+    ui.timer(0.01, render_tick)
     prune_edit_rounds()
-    render_all()
+    mark_ui_dirty()
+    render_tick()
     if (p := chat.consume_user_input_prefill()) and not (refs.input_field.value or '').strip():
-        state.draft = p
-        refs.input_field.value = p
+        set_draft_text(p)
+        mark_ui_dirty()
 
 
 if __name__ in {'__main__', '__mp_main__'}:
