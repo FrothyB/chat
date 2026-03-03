@@ -40,7 +40,7 @@ EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections exact
 Rules:
 The command can be "Replace", "Insert Before" or "Insert After";
 Target can be `X` (single line) or `X`-`Y` (range);
-Place the full original contents of a single line into X and Y, including leading whitespace;
+Place the full original (unmodified) contents of a single line into X and Y, including leading whitespace;
 If X is not unique, denote its Nth occurence using `X` N or `X` N-`Y`;
 If Y is not unique, the first matching occurence will be used;
 There can be multiple commands per Edit with non-overlapping line ranges in any order;
