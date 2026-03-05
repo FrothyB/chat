@@ -11,9 +11,9 @@ API_KEY = os.getenv('OPENROUTER_API_KEY')
 BASE_URL = 'https://openrouter.ai/api/v1'
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-DEFAULT_MODEL = 'openai/gpt-5.3-codex'
+DEFAULT_MODEL = 'openai/gpt-5.4'
 DEFAULT_REASONING = 'medium'
-MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.3-codex', 'openai/gpt-5.2-pro', 'anthropic/claude-4.6-opus', 'qwen/qwen3.5-35b-a3b']
+MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.4', 'openai/gpt-5.4-pro', 'anthropic/claude-4.6-opus', 'qwen/qwen3.5-35b-a3b']
 REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high']
 
 FILE_LIKE_EXTS = {'.py', '.pyw', '.ipynb', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.go', '.rs', '.cs', '.java', '.html', '.htm', '.css', '.md', '.markdown', '.txt', '.rst', '.json', '.yaml', '.yml', '.toml', '.sql', '.sh', '.bash', '.zsh', '.bat', '.ps1'}
@@ -678,7 +678,7 @@ class ChatClient:
         assistant_index = len(self.messages)
         self._last_assistant_index = assistant_index
         self.messages.append({'role': 'assistant', 'content': ''})
-        data = {'model': model, 'messages': self.messages[:-1], 'max_tokens': 50000, 'temperature': 0.2, 'stream': True, 'reasoning_effort': reasoning}
+        data = {'model': model, 'messages': self.messages[:-1], 'max_tokens': 50000, 'temperature': 0.4, 'stream': True, 'reasoning_effort': reasoning}
 
         async def _gen():
             full = ''
