@@ -41,7 +41,7 @@ Rules:
 The command can be "Replace", "Insert Before" or "Insert After";
 Targets can take one of two forms: `X` (single line) or `X`-`Y` (range);
 X (and Y where applicable) must contain the full original unmodified contents of exactly one line, including leading whitespace;
-Matching is purely textual and for a single line;
+Matching is purely textual and line-based;
 If X is not unique, denote its Nth occurence using `X` N or `X` N-`Y`;
 If Y is not unique, the first matching occurence will be used;
 There can be multiple commands per Edit with non-overlapping line ranges in any order;
