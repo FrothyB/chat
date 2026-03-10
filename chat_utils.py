@@ -185,9 +185,9 @@ def read_files(file_paths: List[str]) -> str:
 
 class EditService:
     _EDIT_HDR_RE = re.compile(r'(?mi)^\s*###\s*edit\s+(.+?)\s*$')
-    _REPLACE_HDR_RE = re.compile(r'(?mi)^\s*####\s*replace\s+`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?(?:-\s*`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?)?\s*$')
-    _INSERT_AFTER_HDR_RE = re.compile(r'(?mi)^\s*####\s*insert\s+after\s+`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?(?:-\s*`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?)?\s*$')
-    _INSERT_BEFORE_HDR_RE = re.compile(r'(?mi)^\s*####\s*insert\s+before\s+`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?(?:-\s*`+\s*([^\n`]*?)\s*`+\s*(?:(\d+)\s*)?)?\s*$')
+    _REPLACE_HDR_RE = re.compile(r'(?mi)^\s*####\s*replace\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
+    _INSERT_AFTER_HDR_RE = re.compile(r'(?mi)^\s*####\s*insert\s+after\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
+    _INSERT_BEFORE_HDR_RE = re.compile(r'(?mi)^\s*####\s*insert\s+before\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
     _FENCE_OPEN_RE = re.compile(r'(?m)^\s*```[ \t]*([^\n`]*)\s*$')
     _FENCE_CLOSE_RE = re.compile(r'(?m)^\s*```\s*$')
     _HEADER_SPECS = (('replace', _REPLACE_HDR_RE, 'Replace'), ('insert_after', _INSERT_AFTER_HDR_RE, 'Insert After'), ('insert_before', _INSERT_BEFORE_HDR_RE, 'Insert Before'))
@@ -201,10 +201,6 @@ class EditService:
     @staticmethod
     def _norm_newlines(s: str) -> str:
         return (s or '').replace('\r\n', '\n').replace('\r', '\n')
-
-    @staticmethod
-    def _canon_line(s: str) -> str:
-        return (s or '').strip()
 
     @staticmethod
     def _atomic_write(path: Path, content: str):
@@ -270,10 +266,10 @@ class EditService:
             if len(cands) == 1: return cands[0][0] + 1, cands[0][1] + 1
             if occ is not None: return None
 
-            hint = {cls._canon_line(z) for z in (hint_lines or []) if cls._canon_line(z)}
+            hint = {v for z in (hint_lines or []) if (v := norm(z))}
             if len(hint) < REPLACE_DISAMBIG_MIN_UNIQUE_LINE_HITS: return None
 
-            sets = [{cls._canon_line(z) for z in lines[i:j + 1] if cls._canon_line(z)} & hint for i, j in cands]
+            sets = [{v for z in lines[i:j + 1] if (v := norm(z))} & hint for i, j in cands]
             freq: Dict[str, int] = {}
             for s in sets:
                 for z in s: freq[z] = freq.get(z, 0) + 1

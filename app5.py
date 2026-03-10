@@ -197,16 +197,26 @@ async def main_page():
         return out
 
     def set_pending_edits(text: str, assistant_index: int):
-        targets = edit_targets(text) or ['edits']
+        text, targets = (text or '').rstrip(), edit_targets(text) or ['edits']
         state.pending_edits_text, state.pending_edit_assistant, state.pending_edit_targets = text, assistant_index, targets
         state.last_edit_status, state.phase = 'pending', 'awaiting_edit_decision'
-        state.edit_rounds[assistant_index] = {'status': 'pending', 'items': [{'label': t, 'status': 'pending'} for t in targets]}
+        state.edit_rounds[assistant_index] = {'status': 'pending', 'items': [{'label': t, 'status': 'pending'} for t in targets], 'text': text}
+
+    def reopen_edit_round(assistant_index: int) -> bool:
+        r = state.edit_rounds.get(assistant_index) or {}
+        text = str(r.get('text') or '').rstrip()
+        if r.get('status') != 'rejected' or not text or state.pending_edits_text or not (0 <= assistant_index < len(chat.messages)): return False
+        targets = [str(it.get('label') or '').strip() for it in (r.get('items') or []) if str(it.get('label') or '').strip()] or edit_targets(text) or ['edits']
+        state.pending_edits_text, state.pending_edit_assistant, state.pending_edit_targets = text, assistant_index, targets
+        state.last_edit_status, state.phase = None, 'awaiting_edit_decision'
+        state.edit_rounds[assistant_index] = {'status': 'pending', 'items': [{'label': t, 'status': 'pending'} for t in targets], 'text': text}
+        return True
 
     def clear_pending_edits(reject: bool = False):
         text, ai = (state.pending_edits_text or '').rstrip(), state.pending_edit_assistant
         if reject and text and ai is not None:
             targets = state.pending_edit_targets[:] or edit_targets(text) or ['edits']
-            state.edit_rounds[ai] = {'status': 'error', 'items': [{'label': t, 'status': 'error'} for t in targets]}
+            state.edit_rounds[ai] = {'status': 'rejected', 'items': [{'label': t, 'status': 'error'} for t in targets], 'text': text}
             state.last_edit_status = 'rejected'
         elif text and ai is not None:
             state.edit_rounds.pop(ai, None)
@@ -217,6 +227,7 @@ async def main_page():
         if status == 'pending': return 'tips_and_updates', 'text-blue-300', 'Edits available'
         if status == 'success': return 'check_circle', 'text-green-400', 'All edits applied'
         if status == 'partial': return 'warning', 'text-amber-400', 'Some edits applied'
+        if status == 'rejected': return 'cancel', 'text-red-400', 'Edits rejected'
         return 'cancel', 'text-red-400', 'Edits not applied'
 
     def render_edit_round_slot(slot, assistant_index: int):
@@ -239,6 +250,13 @@ async def main_page():
                         ui.icon(icon).classes(cls)
                         ui.label(name).classes('tool-att-label text-gray-300')
 
+    def timer_text() -> str:
+        if state.phase != 'streaming' or state.stream_started_at <= 0: return '0:00'
+        e = max(0, int(time.monotonic() - state.stream_started_at))
+        return f'{e // 60}:{(e % 60):02d}'
+
+    def assistant_message_indices() -> list[int]:
+        return [i for i, m in enumerate(chat.messages) if m.get('role') == 'assistant']
     def build_tools(target_id: str, get_text, with_timer: bool = False, atts: list[dict[str, str]] | None = None, assistant_index: int | None = None):
         tools, timer = ui.element('div').classes('answer-tools flex items-center gap-2 flex-wrap').props(f'id={target_id}-tools'), None
         with tools:
@@ -262,7 +280,7 @@ async def main_page():
             if assistant_index is not None:
                 slot = ui.element('div').classes('inline-flex items-center gap-2 flex-wrap')
                 render_edit_round_slot(slot, assistant_index)
-            if with_timer: timer = ui.label('0:00').classes('timer')
+            if with_timer: timer = ui.label(timer_text()).classes('timer')
         return timer
 
     def render_user_message(content: str, atts: list[dict[str, str]] | None = None):
@@ -276,7 +294,7 @@ async def main_page():
                 build_tools(uid, get_text=lambda c=content: c, atts=atts)
         scan_code_copy_buttons(uid)
 
-    def render_assistant_message(content: str, streaming: bool = False, message_index: int | None = None):
+    def render_assistant_message(content: str, streaming: bool = False, assistant_index: int | None = None):
         state.answer_counter += 1
         aid = f'answer-{state.answer_counter}'
         rendered = with_temp_code_fence(chat.render_for_display(content)) if streaming else content
@@ -285,8 +303,8 @@ async def main_page():
                 with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble').props(f'id={aid}'):
                     md = ui.markdown(rendered, extras=MD_EXTRAS).classes(MD_CLASSES)
             with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
-                if streaming: refs.timer_label = build_tools(aid, get_text=lambda m=md: m.content, with_timer=True, assistant_index=message_index)
-                else: build_tools(aid, get_text=lambda m=md: m.content, assistant_index=message_index)
+                if streaming: refs.timer_label = build_tools(aid, get_text=lambda m=md: m.content, with_timer=True, assistant_index=assistant_index)
+                else: build_tools(aid, get_text=lambda m=md: m.content, assistant_index=assistant_index)
         scan_code_copy_buttons(aid)
 
     def render_file_chip(path: str):
@@ -349,12 +367,16 @@ async def main_page():
         refs.timer_label = None
         state.msg_counter, state.answer_counter = 0, 0
 
-        last_assistant_index = len(chat.messages) - 1 if chat.messages and chat.messages[-1].get('role') == 'assistant' else None
-        for i, (role, content, atts) in enumerate(chat.get_display_messages(), start=1):
+        display_messages, assistant_indices, assistant_pos = list(chat.get_display_messages()), assistant_message_indices(), 0
+        last_assistant_index = assistant_indices[-1] if assistant_indices else None
+        for role, content, atts in display_messages:
             if role == 'user':
                 render_user_message(content, atts)
-            elif role == 'assistant':
-                render_assistant_message(content, streaming=(state.phase == 'streaming' and i == last_assistant_index), message_index=i)
+                continue
+            if role != 'assistant': continue
+            assistant_index = assistant_indices[assistant_pos] if assistant_pos < len(assistant_indices) else None
+            assistant_pos += 1
+            render_assistant_message(content, streaming=(state.phase == 'streaming' and assistant_index == last_assistant_index), assistant_index=assistant_index)
 
         for p in chat.files: render_file_chip(p)
         for item in state.url_attachments: render_url_chip(item)
@@ -483,6 +505,8 @@ async def main_page():
             ui.notify('No messages to undo', type='warning')
             return
         prune_edit_rounds()
+        ai = len(chat.messages) - 1 if chat.messages and chat.messages[-1].get('role') == 'assistant' else None
+        if ai is not None: reopen_edit_round(ai)
         state.url_attachments = [{'url': (a.get('url') or ''), 'content': (a.get('content') or '')} for a in (atts or []) if (a.get('kind') or '').lower() == 'url' and (a.get('url') or '').strip()]
         set_draft_text(msg)
         mark_ui_dirty()
@@ -589,9 +613,7 @@ async def main_page():
             await send()
 
     def tick_timer():
-        if refs.timer_label and state.phase == 'streaming':
-            elapsed = int(time.monotonic() - state.stream_started_at)
-            refs.timer_label.text = f'{elapsed // 60}:{(elapsed % 60):02d}'
+        if refs.timer_label and state.phase == 'streaming': refs.timer_label.text = timer_text()
 
     def render_tick():
         if state.render_in_progress or not state.ui_dirty:
