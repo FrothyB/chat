@@ -105,6 +105,7 @@ class UiState:
     ui_dirty_during_render: bool = False
     next_render_allowed_at: float = 0.0
     last_render_duration: float = 0.0
+    answer_timers: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -141,6 +142,7 @@ async def main_page():
     if not hasattr(state, 'ui_dirty_during_render'): state.ui_dirty_during_render = False
     if not hasattr(state, 'next_render_allowed_at'): state.next_render_allowed_at = 0.0
     if not hasattr(state, 'last_render_duration'): state.last_render_duration = 0.0
+    if not hasattr(state, 'answer_timers'): state.answer_timers = {}
 
     if state.phase != 'streaming':
         state.stream_task, state.stream_text, state.stream_started_at, state.stream_has_answer = None, '', 0.0, False
@@ -187,6 +189,8 @@ async def main_page():
 
     def prune_edit_rounds():
         state.edit_rounds = {i: v for i, v in state.edit_rounds.items() if 0 <= i < len(chat.messages)}
+    def prune_answer_timers():
+        state.answer_timers = {i: v for i, v in state.answer_timers.items() if 0 <= i < len(chat.messages) and chat.messages[i].get('role') == 'assistant'}
         
     def edit_targets(text: str) -> list[str]:
         out = []
@@ -250,14 +254,20 @@ async def main_page():
                         ui.icon(icon).classes(cls)
                         ui.label(name).classes('tool-att-label text-gray-300')
 
-    def timer_text() -> str:
-        if state.phase != 'streaming' or state.stream_started_at <= 0: return '0:00'
-        e = max(0, int(time.monotonic() - state.stream_started_at))
+    def stream_elapsed() -> int:
+        return max(0, int(time.monotonic() - state.stream_started_at)) if state.stream_started_at > 0 else 0
+
+    def record_stream_timer():
+        if state.stream_started_at <= 0 or not chat.messages or chat.messages[-1].get('role') != 'assistant': return
+        state.answer_timers[len(chat.messages) - 1] = stream_elapsed()
+
+    def timer_text(seconds: int | None = None) -> str:
+        e = stream_elapsed() if seconds is None else max(0, int(seconds))
         return f'{e // 60}:{(e % 60):02d}'
 
     def assistant_message_indices() -> list[int]:
         return [i for i, m in enumerate(chat.messages) if m.get('role') == 'assistant']
-    def build_tools(target_id: str, get_text, with_timer: bool = False, atts: list[dict[str, str]] | None = None, assistant_index: int | None = None):
+    def build_tools(target_id: str, get_text, with_timer: bool = False, atts: list[dict[str, str]] | None = None, assistant_index: int | None = None, timer_value: int | None = None):
         tools, timer = ui.element('div').classes('answer-tools flex items-center gap-2 flex-wrap').props(f'id={target_id}-tools'), None
         with tools:
             copy_btn = None
@@ -280,7 +290,7 @@ async def main_page():
             if assistant_index is not None:
                 slot = ui.element('div').classes('inline-flex items-center gap-2 flex-wrap')
                 render_edit_round_slot(slot, assistant_index)
-            if with_timer: timer = ui.label(timer_text()).classes('timer')
+            if with_timer or timer_value is not None: timer = ui.label(timer_text(timer_value)).classes('timer')
         return timer
 
     def render_user_message(content: str, atts: list[dict[str, str]] | None = None):
@@ -304,7 +314,7 @@ async def main_page():
                     md = ui.markdown(rendered, extras=MD_EXTRAS).classes(MD_CLASSES)
             with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
                 if streaming: refs.timer_label = build_tools(aid, get_text=lambda m=md: m.content, with_timer=True, assistant_index=assistant_index)
-                else: build_tools(aid, get_text=lambda m=md: m.content, assistant_index=assistant_index)
+                else: build_tools(aid, get_text=lambda m=md: m.content, assistant_index=assistant_index, timer_value=state.answer_timers.get(assistant_index) if assistant_index is not None else None)
         scan_code_copy_buttons(aid)
 
     def render_file_chip(path: str):
@@ -438,6 +448,7 @@ async def main_page():
     def finalize_stream_state(err: str | None = None):
         if state.phase != 'streaming': return
         full = persist_stream_output()
+        record_stream_timer()
         reset_stream_state()
         if err:
             ui.notify(f'Error: {err}', type='negative')
@@ -481,6 +492,7 @@ async def main_page():
         t = state.stream_task
         if t and not t.done(): t.cancel()
         persist_stream_output()
+        record_stream_timer()
         reset_stream_state()
         mark_ui_dirty()
         ui.notify('Response stopped', type='info')
@@ -518,7 +530,7 @@ async def main_page():
         clear_edit_round_state()
         chat = ChatClient()
         storage['chat'] = chat
-        state.url_attachments, state.edit_rounds = [], {}
+        state.url_attachments, state.edit_rounds, state.answer_timers = [], {}, {}
         state.stream_text, state.stream_task, state.stream_started_at = '', None, 0.0
         state.stream_done, state.stream_error, state.stream_has_answer = False, None, False
         set_draft_text('')
@@ -632,6 +644,7 @@ async def main_page():
                 state.stream_done, state.stream_error = False, None
                 finalize_stream_state(err)
             prune_edit_rounds()
+            prune_answer_timers()
             render_all()
             rendered_ok = True
         finally:

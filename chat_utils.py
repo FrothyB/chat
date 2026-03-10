@@ -184,10 +184,10 @@ def read_files(file_paths: List[str]) -> str:
 
 
 class EditService:
-    _EDIT_HDR_RE = re.compile(r'(?mi)^\s*###\s*edit\s+(.+?)\s*$')
-    _REPLACE_HDR_RE = re.compile(r'(?mi)^\s*####\s*replace\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
-    _INSERT_AFTER_HDR_RE = re.compile(r'(?mi)^\s*####\s*insert\s+after\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
-    _INSERT_BEFORE_HDR_RE = re.compile(r'(?mi)^\s*####\s*insert\s+before\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
+    _EDIT_HDR_RE = re.compile(r'(?mi)^\s*#+\s*edit\s+(.+?)\s*$')
+    _REPLACE_HDR_RE = re.compile(r'(?mi)^\s*#+\s*replace\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
+    _INSERT_AFTER_HDR_RE = re.compile(r'(?mi)^\s*#+\s*insert\s+after\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
+    _INSERT_BEFORE_HDR_RE = re.compile(r'(?mi)^\s*#+\s*insert\s+before\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
     _FENCE_OPEN_RE = re.compile(r'(?m)^\s*```[ \t]*([^\n`]*)\s*$')
     _FENCE_CLOSE_RE = re.compile(r'(?m)^\s*```\s*$')
     _HEADER_SPECS = (('replace', _REPLACE_HDR_RE, 'Replace'), ('insert_after', _INSERT_AFTER_HDR_RE, 'Insert After'), ('insert_before', _INSERT_BEFORE_HDR_RE, 'Insert Before'))
@@ -357,7 +357,7 @@ class EditService:
 
     def render_for_display(self, md: str, ctx_files: Optional[List[str]] = None) -> str:
         text = md or ''
-        if '####' not in text: return text
+        if not any(rx.search(text) for _, rx, _ in self._HEADER_SPECS): return text
         lines, out, cur, i, cache, pending = text.split('\n'), [], '', 0, {}, None
 
         def get_lines(filename: str) -> Optional[List[str]]:
