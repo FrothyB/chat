@@ -91,6 +91,7 @@ class CouncilMember:
     done: bool = False
     finalized: bool = False
     error: str | None = None
+    interrupted: bool = False
     has_answer: bool = False
 
 
@@ -102,6 +103,7 @@ class CouncilRound:
     attachments: list[dict[str, str]] = field(default_factory=list)
     members: list[CouncilMember] = field(default_factory=list)
     synthesis: CouncilMember | None = None
+    # These mirror hidden entries in chat.messages; rendering, timers, undo, and edit application are intentionally index-fragile here.
     hidden_user_index: int | None = None
     hidden_assistant_index: int | None = None
 
@@ -140,6 +142,7 @@ class StreamState:
     started_at: float = 0.0
     done: bool = False
     error: str | None = None
+    interrupted: bool = False
     has_answer: bool = False
     assistant: int | None = None
     run_id: int = 0
@@ -175,6 +178,9 @@ class UiRefs:
 
 def item_status(x: Any) -> Literal['pending', 'success', 'partial', 'error']: return x if x in {'pending', 'success', 'partial', 'error'} else 'error'
 def round_status(x: Any) -> Literal['pending', 'success', 'partial', 'rejected', 'error']: return x if x in {'pending', 'success', 'partial', 'rejected', 'error'} else 'error'
+def int_or(x: Any, d: int = 0) -> int:
+    try: return int(x)
+    except (TypeError, ValueError): return d
 
 
 def coerce_url_attachment(x: Any) -> UrlAttachment | None:
@@ -206,15 +212,16 @@ def coerce_council_member(x: Any) -> CouncilMember | None:
         token=token,
         model=model,
         label=label,
-        ordinal=max(1, int(x.get('ordinal') or 1)),
+        ordinal=max(1, int_or(x.get('ordinal'), 1)),
         ctx_files=[str(p) for p in (x.get('ctx_files') or []) if str(p).strip()],
         raw=str(x.get('raw') or ''),
         display=str(x.get('display') or ''),
         reasoning=str(x.get('reasoning') or ''),
-        elapsed=max(0, int(x.get('elapsed') or 0)),
+        elapsed=max(0, int_or(x.get('elapsed'), 0)),
         done=bool(x.get('done')),
         finalized=bool(x.get('finalized')),
         error=(str(x.get('error')) if x.get('error') is not None else None),
+        interrupted=bool(x.get('interrupted')),
         has_answer=bool(x.get('has_answer')),
     )
 
@@ -224,25 +231,243 @@ def coerce_council_round(x: Any) -> CouncilRound | None:
     if not isinstance(x, dict): return None
     members = [m for y in (x.get('members') or []) if (m := coerce_council_member(y))]
     if not members: return None
+    u, a = int_or(x.get('hidden_user_index'), 0), int_or(x.get('hidden_assistant_index'), 0)
     return CouncilRound(
-        round_id=max(1, int(x.get('round_id') or 1)),
+        round_id=max(1, int_or(x.get('round_id'), 1)),
         query=str(x.get('query') or ''),
         display_query=str(x.get('display_query') or ''),
-        attachments=[dict(a) for a in (x.get('attachments') or []) if isinstance(a, dict)],
+        attachments=[dict(v) for v in (x.get('attachments') or []) if isinstance(v, dict)],
         members=members,
         synthesis=coerce_council_member(x.get('synthesis')),
-        hidden_user_index=(max(1, int(x.get('hidden_user_index'))) if x.get('hidden_user_index') is not None else None),
-        hidden_assistant_index=(max(1, int(x.get('hidden_assistant_index'))) if x.get('hidden_assistant_index') is not None else None),
+        hidden_user_index=(u if u > 0 else None),
+        hidden_assistant_index=(a if a > 0 else None),
     )
 
 
+class ChatPageView:
+    def __init__(self, page: 'ChatPageController'): self.page = page
+
+    def js_call(self, method: str, *args: Any):
+        s = ', '.join(json.dumps(a) for a in args)
+        ui.run_javascript(f'(() => {{ const f = n => window.chat7 ? window.chat7.{method}({s}) : n > 0 && setTimeout(() => f(n - 1), 50); f(40); }})();')
+
+    def set_markdown(self, content_id: str, text: str, now: bool = False): self.js_call('setMarkdown', content_id, text, now)
+    def append_markdown(self, content_id: str, chunk: str): self.js_call('appendMarkdown', content_id, chunk)
+    def focus_input(self): ui.run_javascript('document.getElementById("input-field")?.querySelector("textarea")?.focus()')
+    def focus_file_search(self): ui.run_javascript('document.querySelector("#file-search")?.focus()')
+
+    def scroll_active_into_view(self):
+        p = self.page
+        if p.state.search_idx >= 0: ui.run_javascript(f'document.getElementById("file-opt-{p.state.search_idx}")?.scrollIntoView({{block:"nearest"}});')
+
+    def clear_search_results(self):
+        p = self.page
+        p.state.search_results, p.state.search_idx = [], -1
+        if p.refs.file_results_container: p.refs.file_results_container.clear()
+
+    def clear_rendered_messages(self):
+        p = self.page
+        if p.refs.container: p.refs.container.clear()
+        p.refs.nodes.clear(), p.refs.content_ids.clear(), p.refs.edit_slots.clear(), p.refs.timer_labels.clear(), p.refs.order.clear()
+
+    def update_controls(self):
+        p = self.page
+        streaming = p.state.phase in {Phase.STREAMING, Phase.COUNCIL_STREAMING, Phase.COUNCIL_SYNTHESIZING}
+        can_send = p.state.phase in {Phase.IDLE, Phase.AWAITING_EDIT}
+        can_back = not streaming
+        if p.refs.stop_btn: p.refs.stop_btn.set_visibility(streaming)
+        if p.refs.back_btn: p.refs.back_btn.set_visibility(can_back)
+        if p.refs.send_btn: p.refs.send_btn.set_visibility(can_send)
+
+    def refresh_model_picker(self):
+        p = self.page
+        if p.refs.model_button:
+            p.refs.model_button.text = p.model_button_text()
+            p.refs.model_button.update()
+        if not p.refs.model_menu_body: return
+        p.refs.model_menu_body.clear()
+        with p.refs.model_menu_body:
+            ui.label('Click to select · shift+click to add council').classes('text-xs text-gray-400 px-3 pt-2')
+            for m in MODELS:
+                row = ui.row().classes('w-96 items-center justify-between gap-3 px-3 py-2 rounded cursor-pointer hover:bg-gray-800')
+                row.on('click', lambda e, x=m: p.on_model_pick(e, x))
+                with row:
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('check', size='16px').classes('text-blue-300' if m == p.state.model else 'opacity-0')
+                        ui.label(m).classes('text-sm text-gray-200')
+                    n = p.state.council_counts.get(m, 0)
+                    if n > 0: ui.label(f'×{n}').classes('text-xs text-blue-200 bg-blue-900/50 rounded px-2 py-0.5')
+            if p.council_total() > 0:
+                ui.separator().classes('w-full my-1')
+                ui.button('Clear council selection', on_click=p.clear_council_selection).props('flat dense size=sm color=grey').classes('mx-3 mb-2')
+
+    def render_pending_attachments(self):
+        p = self.page
+        if not p.refs.attachments: return
+        p.refs.attachments.clear()
+        with p.refs.attachments:
+            for path in p.chat.files:
+                with ui.element('div').classes('pending-att'):
+                    ui.icon('attach_file').classes('text-green-400')
+                    ui.label(Path(path).name).classes('text-green-300 text-sm ellipsis')
+                    ui.button(icon='close', on_click=lambda x=path: p.remove_file(x)).props('flat dense size=sm').classes('text-green-400')
+            for item in p.state.url_attachments:
+                with ui.element('div').classes('pending-att'):
+                    ui.icon('link').classes('text-purple-300')
+                    ui.label(item.url).classes('text-purple-200 text-sm ellipsis')
+                    ui.button(icon='close', on_click=lambda x=item.url: p.remove_url(x)).props('flat dense size=sm').classes('text-purple-300')
+
+    def render_edit_round_slot(self, slot: Any, assistant_index: int):
+        p = self.page
+        if not slot: return
+        slot.clear()
+        r = p.state.edit_rounds.get(assistant_index)
+        if not r: return
+        icon, cls, label = p.edit_round_meta(r.status)
+        with slot:
+            with ui.element('div').classes('tool-att'):
+                ui.icon(icon).classes(cls)
+                ui.label(label).classes('tool-att-label text-gray-300')
+                if r.status == 'pending' and assistant_index == p.state.pending_edit_assistant:
+                    ui.button('Apply', on_click=lambda i=assistant_index: asyncio.create_task(p.apply_pending_edits(i))).props('flat dense size=sm color=positive').classes('ml-1')
+            if r.status != 'pending':
+                for it in r.items:
+                    icon, cls = ('check', 'text-green-400') if it.status == 'success' else ('warning', 'text-amber-400') if it.status == 'partial' else ('close', 'text-red-400')
+                    with ui.element('div').classes('tool-att'):
+                        ui.icon(icon).classes(cls)
+                        ui.label(Path(it.label).name or it.label).classes('tool-att-label text-gray-300')
+
+    def build_tools(self, content_id: str, atts: list[dict[str, str]] | None = None, assistant_index: int | None = None, with_timer: bool = False, timer_value: int | None = None, timer_key: Any = None):
+        p = self.page
+        with ui.element('div').classes('answer-tools flex items-center gap-2 flex-wrap'):
+            ui.button('', on_click=lambda i=content_id, b=f'{content_id}-copy': self.js_call('copyMarkdown', i, b)).props(f'icon=content_copy flat dense size=sm id={content_id}-copy').classes('tool-btn copy-icon')
+            for a in atts or []:
+                kind = (a.get('kind') or '').lower()
+                text = Path((a.get('path') or '')).name if kind == 'file' else (a.get('url') or '') if kind == 'url' else ''
+                if not text: continue
+                with ui.element('div').classes('tool-att'):
+                    ui.icon('attach_file' if kind == 'file' else 'link').classes('text-gray-400')
+                    ui.label(text).classes('tool-att-label text-gray-300')
+            if assistant_index is not None:
+                p.refs.edit_slots[assistant_index] = ui.element('div').classes('inline-flex items-center gap-2 flex-wrap')
+                self.render_edit_round_slot(p.refs.edit_slots[assistant_index], assistant_index)
+            if with_timer or timer_value is not None:
+                key = timer_key if timer_key is not None else assistant_index
+                timer = ui.label(p.timer_text(timer_value)).classes('timer')
+                if key is not None: p.refs.timer_labels[key] = timer
+
+    def render_message(self, token: str, role: str, content: str, label: str, atts: list[dict[str, str]] | None = None, streaming: bool = False, assistant_index: int | None = None, timer_value: int | None = None, timer_key: Any = None):
+        p = self.page
+        if token in p.refs.nodes: return
+        content_id = f'msg8-{len(p.refs.content_ids)}-{time.time_ns()}'
+        p.refs.content_ids[token] = content_id
+        with p.refs.container:
+            wrap = ui.column().classes('w-full gap-1')
+            p.refs.nodes[token], p.refs.order = wrap, p.refs.order + [token]
+            with wrap:
+                ui.label(label).classes('self-end text-[11px] text-gray-500 px-1' if role == 'user' else 'text-[11px] text-gray-500 px-1')
+                if role == 'user':
+                    with ui.element('div').classes('flex justify-end mb-1'):
+                        with ui.element('div').classes('inline-block bg-blue-600 rounded-lg px-3 py-2 max-w-full min-w-0 user-bubble'):
+                            ui.element('div').props(f'id={content_id}').classes(f'{MD_CLASSES} text-white')
+                    with ui.element('div').classes('flex justify-end mb-3'):
+                        self.build_tools(content_id, atts=atts)
+                else:
+                    with ui.element('div').classes('flex justify-start mb-1'):
+                        with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble'):
+                            ui.element('div').props(f'id={content_id}').classes(f'{MD_CLASSES} text-white')
+                    with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
+                        self.build_tools(content_id, assistant_index=assistant_index, with_timer=streaming, timer_value=timer_value, timer_key=timer_key)
+        self.set_markdown(content_id, content, True)
+
+    def render_council_round(self, c: CouncilRound):
+        p = self.page
+        self.render_message(p.council_user_token(c), 'user', p.council_query_text(c), 'You · council', c.attachments)
+        for m in c.members: self.render_message(m.token, 'assistant', p.council_display_text(m), m.label, streaming=p.active_council_matches(c) and p.state.phase == Phase.COUNCIL_STREAMING and not m.finalized, timer_value=m.elapsed, timer_key=m.token)
+        if c.synthesis: self.render_message(c.synthesis.token, 'assistant', p.council_display_text(c.synthesis), c.synthesis.label, streaming=p.active_council_matches(c) and p.state.phase == Phase.COUNCIL_SYNTHESIZING and not c.synthesis.finalized, assistant_index=c.hidden_assistant_index, timer_value=c.synthesis.elapsed, timer_key=c.synthesis.token)
+
+    def render_history(self):
+        p = self.page
+        self.clear_rendered_messages()
+        hidden, anchored, trailing = p.hidden_council_indices(), {}, []
+        for c in p.state.councils:
+            if c.hidden_user_index is None: trailing.append(c)
+            else: anchored.setdefault(c.hidden_user_index, []).append(c)
+        for i, m in enumerate(p.chat.messages[1:], start=1):
+            for c in anchored.get(i, []): self.render_council_round(c)
+            role = m.get('role')
+            if i in hidden or role not in {'user', 'assistant'}: continue
+            atts = [dict(a) for a in (p.chat.message_attachments.get(i, []) or [])] if role == 'user' else []
+            label = 'You' if role == 'user' else (p.chat.assistant_models.get(i) or 'Assistant')
+            self.render_message(p.normal_token(i), role, p.chat.display_text_for(i), label, atts, assistant_index=i if role == 'assistant' else None, timer_value=p.state.answer_timers.get(i), timer_key=i if role == 'assistant' else None)
+        for c in trailing: self.render_council_round(c)
+        self.update_controls()
+
+    def render_search_results(self):
+        p = self.page
+        p.refs.file_results_container.clear()
+        with p.refs.file_results_container:
+            if not p.state.search_results:
+                ui.label('No files found').classes('text-gray-500 p-2')
+                return
+            for i, path in enumerate(p.state.search_results):
+                active = ' active' if i == p.state.search_idx else ''
+                row = ui.row().classes(f'w-full cursor-pointer p-2 rounded text-gray-300 file-option{active}').props(f'data-idx={i} id=file-opt-{i}')
+                row.on('click', lambda _=None, x=path: p.select_file(x))
+                with row:
+                    ui.icon('description').classes('text-gray-500')
+                    ui.label(Path(path).name).classes('flex-grow')
+                    ui.label(str(Path(path).parent)).classes('text-xs text-gray-500')
+
+    def build_header(self):
+        p = self.page
+        with ui.element('div').classes('fixed-header'):
+            with ui.row().classes('gap-2 p-2 w-full items-start'):
+                with ui.element('div').classes('relative'):
+                    p.refs.model_button = ui.button(p.model_button_text(), icon='smart_toy').props('dark outline dense color=white').classes('text-white w-72 header-control header-model-btn')
+                    with ui.menu() as p.refs.model_menu:
+                        p.refs.model_menu_body = ui.column().classes('gap-0 p-1')
+                p.refs.reasoning_select = ui.select(REASONING_LEVELS, label='Reasoning').props(P_PROPS).classes('text-white w-32 header-control').bind_value(p.state, 'reasoning')
+                with ui.element('div').classes('flex-grow relative'):
+                    p.refs.file_search = ui.input(placeholder='Search files or paste URL...').props(f'{P_PROPS} debounce=250 id=file-search').classes('w-full header-control')
+                    p.refs.file_results_container = ui.column().classes('file-results')
+                    p.refs.file_search.on_value_change(p.on_search)
+                    p.refs.file_search.on('keydown', p.on_file_search_keydown)
+        self.refresh_model_picker()
+
+    def build_chat(self):
+        p = self.page
+        with ui.element('div').classes('chat-stack'):
+            p.refs.container = ui.column().classes('chat-container').props(f'id=chat8-{time.time_ns()}')
+
+    def build_footer(self):
+        p = self.page
+        with ui.element('div').classes('chat-footer'):
+            with ui.column().classes('w-full gap-0'):
+                p.refs.attachments = ui.row().classes('pending-atts w-full px-3 gap-1 flex-wrap')
+                with ui.row().classes('w-full p-2 pt-2 gap-2 items-start'):
+                    p.refs.input_field = ui.textarea(placeholder='Type your message...').props(f'{P_PROPS} autogrow input-class="min-h-22 max-h-100" id=input-field').classes('flex-grow text-white').bind_value(p.state, 'draft')
+                    p.refs.input_field.on('keydown', p.on_input_keydown)
+                    with ui.element('div').classes('ctrl-grid'):
+                        p.refs.mode_select = ui.select(['chat+edit', 'chat', 'extract'], label='Mode').props(P_PROPS).classes('ctrl-tile text-white').bind_value(p.state, 'mode')
+                        with ui.element('div').classes('ctrl-stack'):
+                            p.refs.send_btn = ui.button('Send', on_click=lambda: p.send(), icon='send').props('color=primary').classes('ctrl-tile')
+                            p.refs.stop_btn = ui.button('Stop', on_click=p.stop_streaming, icon='stop').props('color=red').classes('ctrl-tile absolute inset-0')
+                        p.refs.back_btn = ui.button('Back', on_click=p.undo, icon='undo').props('color=orange').classes('ctrl-tile')
+                        ui.button('Clear', on_click=p.clear_chat, icon='delete').props('color=grey').classes('ctrl-tile')
+
+
 @dataclass(slots=True)
+# TODO: split this into ChatSession + StreamCoordinator + ChatPageView; the current controller mixes persisted conversation/edit state with transient stream orchestration, and the hidden history indices make that coupling brittle.
 class ChatPageController:
     storage: Any
     state: UiState
     chat: ChatClient
     refs: UiRefs = field(default_factory=UiRefs)
     stream: StreamState = field(default_factory=StreamState)
+    view: Any = field(init=False, repr=False)
+
+    def __post_init__(self): self.view = ChatPageView(self)
 
     @classmethod
     def load(cls, storage: Any):
@@ -254,26 +479,44 @@ class ChatPageController:
 
     def normalize_state(self):
         try: self.state.phase = Phase(self.state.phase)
-        except ValueError: self.state.phase = Phase.IDLE
+        except Exception: self.state.phase = Phase.IDLE
         if self.state.model not in MODELS: self.state.model = DEFAULT_MODEL
         if self.state.reasoning not in REASONING_LEVELS: self.state.reasoning = DEFAULT_REASONING
         if self.state.mode not in {'chat+edit', 'chat', 'extract'}: self.state.mode = 'chat+edit'
         self.state.url_attachments = [a for x in (self.state.url_attachments or []) if (a := coerce_url_attachment(x))]
-        self.state.edit_rounds = {i: coerce_edit_round(r) for i, r in (self.state.edit_rounds or {}).items() if isinstance(i, int) and i >= 0}
-        self.state.answer_timers = {i: max(0, int(v)) for i, v in (self.state.answer_timers or {}).items() if isinstance(i, int) and i >= 0}
-        self.state.council_counts = {m: max(1, int(n)) for m, n in (self.state.council_counts or {}).items() if m in MODELS and int(n) > 0}
+        self.state.pending_edits_text = (self.state.pending_edits_text or '').rstrip() or None
+        ai = int_or(self.state.pending_edit_assistant, -1)
+        self.state.pending_edit_assistant = ai if ai >= 0 else None
+        self.state.pending_edit_targets = [str(t).strip().replace('\\', '/') for t in (self.state.pending_edit_targets or []) if str(t).strip()]
+        self.state.edit_rounds = {k: coerce_edit_round(r) for i, r in (self.state.edit_rounds or {}).items() if (k := int_or(i, -1)) >= 0}
+        self.state.answer_timers = {k: max(0, int_or(v, 0)) for i, v in (self.state.answer_timers or {}).items() if (k := int_or(i, -1)) >= 0}
+        self.state.council_counts = {m: max(1, n) for m, x in (self.state.council_counts or {}).items() if m in MODELS and (n := int_or(x, 0)) > 0}
         self.state.councils = [c for x in (self.state.councils or []) if (c := coerce_council_round(x))]
+        self.state.search_idx = int_or(self.state.search_idx, -1)
+        self.state.next_council_id = max([1, int_or(self.state.next_council_id, 1), *(c.round_id + 1 for c in self.state.councils)])
         if self.state.phase in {Phase.COUNCIL_STREAMING, Phase.COUNCIL_SYNTHESIZING} and not self.state.councils: self.state.phase = Phase.IDLE
+        if self.state.phase == Phase.AWAITING_EDIT and (self.state.pending_edit_assistant is None or not self.state.pending_edits_text): self.state.pending_edits_text, self.state.pending_edit_assistant, self.state.pending_edit_targets, self.state.phase = None, None, [], Phase.IDLE
 
-    def js_call(self, method: str, *args: Any):
-        s = ', '.join(json.dumps(a) for a in args)
-        ui.run_javascript(f'(() => {{ const f = n => window.chat7 ? window.chat7.{method}({s}) : n > 0 && setTimeout(() => f(n - 1), 50); f(40); }})();')
+    def js_call(self, method: str, *args: Any): self.view.js_call(method, *args)
+    def set_markdown(self, content_id: str, text: str, now: bool = False): self.view.set_markdown(content_id, text, now)
+    def append_markdown(self, content_id: str, chunk: str): self.view.append_markdown(content_id, chunk)
+    def focus_input(self): self.view.focus_input()
+    def focus_file_search(self): self.view.focus_file_search()
+    def scroll_active_into_view(self): self.view.scroll_active_into_view()
+    def clear_search_results(self): self.view.clear_search_results()
+    def clear_rendered_messages(self): self.view.clear_rendered_messages()
+    def update_controls(self): self.view.update_controls()
+    def refresh_model_picker(self): self.view.refresh_model_picker()
+    def render_pending_attachments(self): self.view.render_pending_attachments()
+    def render_edit_round_slot(self, slot: Any, assistant_index: int): self.view.render_edit_round_slot(slot, assistant_index)
+    def render_message(self, token: str, role: str, content: str, label: str, atts: list[dict[str, str]] | None = None, streaming: bool = False, assistant_index: int | None = None, timer_value: int | None = None, timer_key: Any = None): self.view.render_message(token, role, content, label, atts, streaming, assistant_index, timer_value, timer_key)
+    def render_council_round(self, c: CouncilRound): self.view.render_council_round(c)
+    def render_history(self): self.view.render_history()
+    def render_search_results(self): self.view.render_search_results()
+    def build_header(self): self.view.build_header()
+    def build_chat(self): self.view.build_chat()
+    def build_footer(self): self.view.build_footer()
 
-    def set_markdown(self, content_id: str, text: str, now: bool = False): self.js_call('setMarkdown', content_id, text, now)
-    def append_markdown(self, content_id: str, chunk: str): self.js_call('appendMarkdown', content_id, chunk)
-    def focus_input(self): ui.run_javascript('document.getElementById("input-field")?.querySelector("textarea")?.focus()')
-    def focus_file_search(self): ui.run_javascript('document.querySelector("#file-search")?.focus()')
-    def scroll_active_into_view(self): ui.run_javascript(f'document.getElementById("file-opt-{self.state.search_idx}")?.scrollIntoView({{block:"nearest"}});') if self.state.search_idx >= 0 else None
     def stream_elapsed(self) -> int: return max(0, int(time.monotonic() - self.stream.started_at)) if self.stream.started_at > 0 else 0
     def timer_text(self, seconds: int | None = None) -> str: x = self.stream_elapsed() if seconds is None else max(0, int(seconds)); return f'{x // 60}:{x % 60:02d}'
     def council_elapsed(self, m: CouncilMember) -> int: return max(0, int(time.monotonic() - m.started_at)) if m.started_at > 0 and not m.finalized else m.elapsed
@@ -285,8 +528,9 @@ class ChatPageController:
     def latest_council(self) -> CouncilRound | None: return self.state.councils[-1] if self.state.councils else None
     def active_council(self) -> CouncilRound | None: return self.latest_council() if self.state.phase in {Phase.COUNCIL_STREAMING, Phase.COUNCIL_SYNTHESIZING} else None
     def council_query_text(self, c: CouncilRound) -> str: return (c.display_query or c.query).rstrip() or c.query
-    def council_prompt_text(self, m: CouncilMember) -> str: return (m.raw or m.display or m.reasoning).rstrip() or ('Response stopped.' if m.finalized else '')
-    def council_display_text(self, m: CouncilMember) -> str: return (m.display or m.raw or m.reasoning).rstrip() or ('Response stopped.' if m.finalized else '')
+    # Reasoning is shown live while streaming but intentionally never persisted or fed into later prompts.
+    def council_prompt_text(self, m: CouncilMember) -> str: return (m.raw or m.display).rstrip() or ('Response stopped.' if m.finalized else '')
+    def council_display_text(self, m: CouncilMember) -> str: return (m.display or m.raw).rstrip() or ('Response stopped.' if m.finalized else '')
     def hidden_council_indices(self) -> set[int]: return {i for c in self.state.councils for i in (c.hidden_user_index, c.hidden_assistant_index) if isinstance(i, int) and i >= 0}
     def council_members(self, c: CouncilRound) -> list[CouncilMember]: return c.members + ([c.synthesis] if c.synthesis else [])
     def active_council_matches(self, c: CouncilRound) -> bool: return bool(self.active_council() and self.active_council().round_id == c.round_id)
@@ -296,14 +540,6 @@ class ChatPageController:
         for i, m in enumerate(c.members, start=1): parts += [f'### {i}. {m.label}', self.council_prompt_text(m)]
         parts.append('Provide the answer directly without talking about the individual responses.')
         return '\n\n'.join(parts).rstrip()
-
-    def clear_search_results(self):
-        self.state.search_results, self.state.search_idx = [], -1
-        if self.refs.file_results_container: self.refs.file_results_container.clear()
-
-    def clear_rendered_messages(self):
-        if self.refs.container: self.refs.container.clear()
-        self.refs.nodes.clear(), self.refs.content_ids.clear(), self.refs.edit_slots.clear(), self.refs.timer_labels.clear(), self.refs.order.clear()
 
     def refresh_file_picker(self):
         self.refs.file_search.value = ''
@@ -320,14 +556,6 @@ class ChatPageController:
         ai = len(self.chat.messages) - 1
         return ai if ai >= 0 and self.chat.messages[ai].get('role') == 'assistant' else None
 
-    def update_controls(self):
-        streaming = self.state.phase in {Phase.STREAMING, Phase.COUNCIL_STREAMING, Phase.COUNCIL_SYNTHESIZING}
-        can_send = self.state.phase in {Phase.IDLE, Phase.AWAITING_EDIT}
-        can_back = not streaming
-        if self.refs.stop_btn: self.refs.stop_btn.set_visibility(streaming)
-        if self.refs.back_btn: self.refs.back_btn.set_visibility(can_back)
-        if self.refs.send_btn: self.refs.send_btn.set_visibility(can_send)
-
     def set_phase(self, phase: Phase):
         self.state.phase = phase
         self.update_controls()
@@ -335,27 +563,6 @@ class ChatPageController:
     def model_button_text(self) -> str:
         n = self.council_total()
         return self.state.model if n <= 0 else f'{self.state.model} +{n} council'
-
-    def refresh_model_picker(self):
-        if self.refs.model_button:
-            self.refs.model_button.text = self.model_button_text()
-            self.refs.model_button.update()
-        if not self.refs.model_menu_body: return
-        self.refs.model_menu_body.clear()
-        with self.refs.model_menu_body:
-            ui.label('Click to select · shift+click to add council').classes('text-xs text-gray-400 px-3 pt-2')
-            for m in MODELS:
-                row = ui.row().classes('w-96 items-center justify-between gap-3 px-3 py-2 rounded cursor-pointer hover:bg-gray-800')
-                row.on('click', lambda e, x=m: self.on_model_pick(e, x))
-                with row:
-                    with ui.row().classes('items-center gap-2'):
-                        ui.icon('check', size='16px').classes('text-blue-300' if m == self.state.model else 'opacity-0')
-                        ui.label(m).classes('text-sm text-gray-200')
-                    n = self.state.council_counts.get(m, 0)
-                    if n > 0: ui.label(f'×{n}').classes('text-xs text-blue-200 bg-blue-900/50 rounded px-2 py-0.5')
-            if self.council_total() > 0:
-                ui.separator().classes('w-full my-1')
-                ui.button('Clear council selection', on_click=self.clear_council_selection).props('flat dense size=sm color=grey').classes('mx-3 mb-2')
 
     def on_model_pick(self, event, model: str):
         if event.args.get('shiftKey'):
@@ -399,10 +606,10 @@ class ChatPageController:
     def stream_snapshot(self) -> tuple[int | None, str, str]:
         ai = self.current_stream_assistant()
         raw_answer = (self.chat.messages[ai].get('content') or '') if ai is not None and 0 <= ai < len(self.chat.messages) else ''
-        raw = (raw_answer or self.stream.raw).rstrip() if self.stream.has_answer else (self.stream.reasoning or raw_answer or self.stream.raw).rstrip()
+        raw = (raw_answer or self.stream.raw).rstrip() if self.stream.has_answer else 'Response stopped.'
         raw = raw or 'Response stopped.'
         display = self.stream.display.rstrip() if self.stream.has_answer else raw
-        if not display: display = self.chat.render_for_display(raw)
+        if not display: display = self.chat.render_for_display(raw) if self.stream.has_answer else raw
         return ai, raw, display
 
     def record_stream_timer(self, ai: int | None):
@@ -426,7 +633,7 @@ class ChatPageController:
             if ai in self.refs.timer_labels: self.refs.timer_labels[ai].text = self.timer_text(self.state.answer_timers.get(ai))
         self.reset_stream(invalidate=True)
         if err: ui.notify(f'Error: {err}', type='negative')
-        if ai is not None and had_answer and self.chat.parse_edit_markdown(raw): self.set_pending_edits(raw, ai)
+        if ai is not None and had_answer and not interrupted and not err and self.chat.parse_edit_markdown(raw): self.set_pending_edits(raw, ai)
 
     def settle_orphaned_stream(self):
         if self.state.phase == Phase.STREAMING: self.stream_commit(interrupted=True)
@@ -436,7 +643,7 @@ class ChatPageController:
         if m.has_answer and m.renderer and hasattr(m.renderer, 'finish'):
             delta = m.renderer.finish() or ''
             if delta: m.display += delta
-        raw = (m.raw.rstrip() if m.has_answer else (m.reasoning or m.raw).rstrip()) or 'Response stopped.'
+        raw = (m.raw.rstrip() if m.has_answer else 'Response stopped.') or 'Response stopped.'
         display = (m.display.rstrip() if m.has_answer else raw) or (self.chat.render_for_display(raw, m.ctx_files) if m.has_answer else raw)
         m.raw, m.display, m.elapsed, m.task, m.renderer, m.finalized = raw, display, self.council_elapsed(m), None, None, True
 
@@ -451,12 +658,14 @@ class ChatPageController:
         had_pending = False
         for c in self.state.councils:
             for m in self.council_members(c):
-                if isinstance(m.task, asyncio.Task) and not m.task.done(): m.task.cancel()
+                if isinstance(m.task, asyncio.Task) and not m.task.done():
+                    m.interrupted = True
+                    m.task.cancel()
                 m.task = None
                 if not m.finalized: self.finalize_council_member(m)
             if c.synthesis:
                 self.persist_council_synthesis(c)
-                if c.hidden_assistant_index is not None and c.synthesis.has_answer and self.chat.parse_edit_markdown(c.synthesis.raw):
+                if c.hidden_assistant_index is not None and c.synthesis.has_answer and not c.synthesis.error and not c.synthesis.interrupted and self.chat.parse_edit_markdown(c.synthesis.raw):
                     self.set_pending_edits(c.synthesis.raw, c.hidden_assistant_index)
                     had_pending = True
         if self.state.phase in {Phase.COUNCIL_STREAMING, Phase.COUNCIL_SYNTHESIZING} and not had_pending: self.state.phase = Phase.IDLE
@@ -479,21 +688,6 @@ class ChatPageController:
         if token in self.refs.order: self.refs.order.remove(token)
         if n := self.refs.nodes.pop(token, None): n.delete()
 
-    def render_pending_attachments(self):
-        if not self.refs.attachments: return
-        self.refs.attachments.clear()
-        with self.refs.attachments:
-            for p in self.chat.files:
-                with ui.element('div').classes('pending-att'):
-                    ui.icon('attach_file').classes('text-green-400')
-                    ui.label(Path(p).name).classes('text-green-300 text-sm ellipsis')
-                    ui.button(icon='close', on_click=lambda x=p: self.remove_file(x)).props('flat dense size=sm').classes('text-green-400')
-            for item in self.state.url_attachments:
-                with ui.element('div').classes('pending-att'):
-                    ui.icon('link').classes('text-purple-300')
-                    ui.label(item.url).classes('text-purple-200 text-sm ellipsis')
-                    ui.button(icon='close', on_click=lambda x=item.url: self.remove_url(x)).props('flat dense size=sm').classes('text-purple-300')
-
     def current_attachments(self) -> list[dict[str, str]]:
         return [{'kind': 'file', 'path': p} for p in (self.chat.files or [])] + [{'kind': 'url', 'url': x.url, 'content': x.content} for x in self.state.url_attachments]
 
@@ -505,8 +699,7 @@ class ChatPageController:
         out = []
         for d in self.chat.parse_edit_markdown(text or '') or []:
             raw = (d.filename or '').strip().replace('\\', '/')
-            name = Path(raw).name or raw
-            if name and name not in out: out.append(name)
+            if raw and raw not in out: out.append(raw)
         return out
 
     def edit_round_meta(self, status: str) -> tuple[str, str, str]:
@@ -515,25 +708,6 @@ class ChatPageController:
         if status == 'partial': return 'warning', 'text-amber-400', 'Some edits applied'
         if status == 'rejected': return 'cancel', 'text-red-400', 'Edits rejected'
         return 'cancel', 'text-red-400', 'Edits not applied'
-
-    def render_edit_round_slot(self, slot: Any, assistant_index: int):
-        if not slot: return
-        slot.clear()
-        r = self.state.edit_rounds.get(assistant_index)
-        if not r: return
-        icon, cls, label = self.edit_round_meta(r.status)
-        with slot:
-            with ui.element('div').classes('tool-att'):
-                ui.icon(icon).classes(cls)
-                ui.label(label).classes('tool-att-label text-gray-300')
-                if r.status == 'pending' and assistant_index == self.state.pending_edit_assistant:
-                    ui.button('Apply', on_click=lambda i=assistant_index: asyncio.create_task(self.apply_pending_edits(i))).props('flat dense size=sm color=positive').classes('ml-1')
-            if r.status != 'pending':
-                for it in r.items:
-                    icon, cls = ('check', 'text-green-400') if it.status == 'success' else ('warning', 'text-amber-400') if it.status == 'partial' else ('close', 'text-red-400')
-                    with ui.element('div').classes('tool-att'):
-                        ui.icon(icon).classes(cls)
-                        ui.label(it.label).classes('tool-att-label text-gray-300')
 
     async def apply_pending_edits(self, assistant_index: int):
         if assistant_index != self.state.pending_edit_assistant or not (self.state.pending_edits_text or '').strip(): return
@@ -549,7 +723,7 @@ class ChatPageController:
             ui.notify(f'Edit error: {e}', type='negative')
             return
         kind_map, rank = {'complete': 'success', 'partial': 'partial', 'error': 'error'}, {'success': 0, 'partial': 1, 'error': 2}
-        items = [EditItem(Path(ev.path or ev.filename).name or (ev.path or ev.filename or 'edit'), kind_map[ev.kind]) for ev in events if ev.kind in kind_map] or [EditItem(t, 'error') for t in targets]
+        items = [EditItem(str(ev.path or ev.filename or 'edit').strip().replace('\\', '/'), kind_map[ev.kind]) for ev in events if ev.kind in kind_map] or [EditItem(t, 'error') for t in targets]
         merged, order = {}, []
         for it in items:
             if it.label not in merged: merged[it.label], order = it.status, order + [it.label]
@@ -607,86 +781,19 @@ class ChatPageController:
         self.state.last_edit_status = None
         return note
 
-    def build_tools(self, content_id: str, atts: list[dict[str, str]] | None = None, assistant_index: int | None = None, with_timer: bool = False, timer_value: int | None = None, timer_key: Any = None):
-        with ui.element('div').classes('answer-tools flex items-center gap-2 flex-wrap'):
-            ui.button('', on_click=lambda i=content_id, b=f'{content_id}-copy': self.js_call('copyMarkdown', i, b)).props(f'icon=content_copy flat dense size=sm id={content_id}-copy').classes('tool-btn copy-icon')
-            for a in atts or []:
-                kind = (a.get('kind') or '').lower()
-                text = Path((a.get('path') or '')).name if kind == 'file' else (a.get('url') or '') if kind == 'url' else ''
-                if not text: continue
-                with ui.element('div').classes('tool-att'):
-                    ui.icon('attach_file' if kind == 'file' else 'link').classes('text-gray-400')
-                    ui.label(text).classes('tool-att-label text-gray-300')
-            if assistant_index is not None:
-                self.refs.edit_slots[assistant_index] = ui.element('div').classes('inline-flex items-center gap-2 flex-wrap')
-                self.render_edit_round_slot(self.refs.edit_slots[assistant_index], assistant_index)
-            if with_timer or timer_value is not None:
-                key = timer_key if timer_key is not None else assistant_index
-                timer = ui.label(self.timer_text(timer_value)).classes('timer')
-                if key is not None: self.refs.timer_labels[key] = timer
-
-    def render_message(self, token: str, role: str, content: str, label: str, atts: list[dict[str, str]] | None = None, streaming: bool = False, assistant_index: int | None = None, timer_value: int | None = None, timer_key: Any = None):
-        if token in self.refs.nodes: return
-        content_id = f'msg8-{len(self.refs.content_ids)}-{time.time_ns()}'
-        self.refs.content_ids[token] = content_id
-        with self.refs.container:
-            wrap = ui.column().classes('w-full gap-1')
-            self.refs.nodes[token], self.refs.order = wrap, self.refs.order + [token]
-            with wrap:
-                ui.label(label).classes('self-end text-[11px] text-gray-500 px-1' if role == 'user' else 'text-[11px] text-gray-500 px-1')
-                if role == 'user':
-                    with ui.element('div').classes('flex justify-end mb-1'):
-                        with ui.element('div').classes('inline-block bg-blue-600 rounded-lg px-3 py-2 max-w-full min-w-0 user-bubble'):
-                            ui.element('div').props(f'id={content_id}').classes(f'{MD_CLASSES} text-white')
-                    with ui.element('div').classes('flex justify-end mb-3'):
-                        self.build_tools(content_id, atts=atts)
-                else:
-                    with ui.element('div').classes('flex justify-start mb-1'):
-                        with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble'):
-                            ui.element('div').props(f'id={content_id}').classes(f'{MD_CLASSES} text-white')
-                    with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
-                        self.build_tools(content_id, assistant_index=assistant_index, with_timer=streaming, timer_value=timer_value, timer_key=timer_key)
-        self.set_markdown(content_id, content, True)
-
-    def render_council_round(self, c: CouncilRound):
-        self.render_message(self.council_user_token(c), 'user', self.council_query_text(c), 'You · council', c.attachments)
-        for m in c.members: self.render_message(m.token, 'assistant', self.council_display_text(m), m.label, streaming=self.active_council_matches(c) and self.state.phase == Phase.COUNCIL_STREAMING and not m.finalized, timer_value=m.elapsed, timer_key=m.token)
-        if c.synthesis: self.render_message(c.synthesis.token, 'assistant', self.council_display_text(c.synthesis), c.synthesis.label, streaming=self.active_council_matches(c) and self.state.phase == Phase.COUNCIL_SYNTHESIZING and not c.synthesis.finalized, assistant_index=c.hidden_assistant_index, timer_value=c.synthesis.elapsed, timer_key=c.synthesis.token)
-
-    def render_history(self):
-        self.clear_rendered_messages()
-        hidden, anchored, trailing = self.hidden_council_indices(), {}, []
-        for c in self.state.councils:
-            if c.hidden_user_index is None: trailing.append(c)
-            else: anchored.setdefault(c.hidden_user_index, []).append(c)
-        for i, m in enumerate(self.chat.messages[1:], start=1):
-            for c in anchored.get(i, []): self.render_council_round(c)
-            role = m.get('role')
-            if i in hidden or role not in {'user', 'assistant'}: continue
-            atts = [dict(a) for a in (self.chat.message_attachments.get(i, []) or [])] if role == 'user' else []
-            label = 'You' if role == 'user' else (self.chat.assistant_models.get(i) or 'Assistant')
-            self.render_message(self.normal_token(i), role, self.chat.display_text_for(i), label, atts, assistant_index=i if role == 'assistant' else None, timer_value=self.state.answer_timers.get(i), timer_key=i if role == 'assistant' else None)
-        for c in trailing: self.render_council_round(c)
-        self.update_controls()
-
-    def render_search_results(self):
-        self.refs.file_results_container.clear()
-        with self.refs.file_results_container:
-            if not self.state.search_results:
-                ui.label('No files found').classes('text-gray-500 p-2')
-                return
-            for i, path in enumerate(self.state.search_results):
-                active = ' active' if i == self.state.search_idx else ''
-                row = ui.row().classes(f'w-full cursor-pointer p-2 rounded text-gray-300 file-option{active}').props(f'data-idx={i} id=file-opt-{i}')
-                row.on('click', lambda _=None, p=path: self.select_file(p))
-                with row:
-                    ui.icon('description').classes('text-gray-500')
-                    ui.label(Path(path).name).classes('flex-grow')
-                    ui.label(str(Path(path).parent)).classes('text-xs text-gray-500')
-
-    def select_file(self, path: str):
+    def try_attach_file(self, path: str) -> bool:
+        if err := self.chat.validate_file_attachment(path):
+            ui.notify(err, type='negative')
+            return False
         if path not in self.chat.files: self.chat.files.append(path)
-        self.refresh_file_picker()
+        return True
+    def select_file(self, path: str):
+        if self.try_attach_file(path): self.refresh_file_picker()
+
+    def attach_multiple(self, paths: list[str]):
+        any_added = False
+        for p in paths: any_added = self.try_attach_file(p) or any_added
+        if any_added or paths: self.refresh_file_picker()
 
     def attach_multiple(self, paths: list[str]):
         for p in paths:
@@ -820,7 +927,7 @@ class ChatPageController:
             if delta:
                 m.display += delta
                 if m.token in self.refs.content_ids: self.append_markdown(self.refs.content_ids[m.token], delta)
-        raw = (m.raw.rstrip() if m.has_answer else (m.reasoning or m.raw).rstrip()) or 'Response stopped.'
+        raw = (m.raw.rstrip() if m.has_answer else 'Response stopped.') or 'Response stopped.'
         display = (m.display.rstrip() if m.has_answer else raw) or (self.chat.render_for_display(raw, m.ctx_files) if m.has_answer else raw)
         had_answer = m.has_answer
         m.raw, m.display, m.elapsed, m.task, m.renderer, m.finalized = raw, display, self.council_elapsed(m), None, None, True
@@ -830,7 +937,7 @@ class ChatPageController:
         if c.synthesis and m.token == c.synthesis.token:
             self.persist_council_synthesis(c)
             if self.state.phase == Phase.COUNCIL_SYNTHESIZING and self.active_council_matches(c): self.set_phase(Phase.IDLE)
-            if c.hidden_assistant_index is not None and had_answer and self.chat.parse_edit_markdown(raw): self.set_pending_edits(raw, c.hidden_assistant_index)
+            if c.hidden_assistant_index is not None and had_answer and not m.error and not m.interrupted and self.chat.parse_edit_markdown(raw): self.set_pending_edits(raw, c.hidden_assistant_index)
             return
         if self.state.phase == Phase.COUNCIL_STREAMING and self.active_council_matches(c) and c.synthesis is None and all(x.finalized for x in c.members): self.start_council_synthesis(c)
 
@@ -938,7 +1045,9 @@ class ChatPageController:
                 return
             self.set_phase(Phase.IDLE)
             for m in c.members:
-                if isinstance(m.task, asyncio.Task) and not m.task.done(): m.task.cancel()
+                if isinstance(m.task, asyncio.Task) and not m.task.done():
+                    m.interrupted = True
+                    m.task.cancel()
                 m.done = True
                 if not m.finalized: self.commit_council_member(c, m)
             ui.notify('Council stopped', type='info')
@@ -949,7 +1058,9 @@ class ChatPageController:
                 ui.notify('No active response to stop', type='warning')
                 return
             self.set_phase(Phase.IDLE)
-            if isinstance(c.synthesis.task, asyncio.Task) and not c.synthesis.task.done(): c.synthesis.task.cancel()
+            if isinstance(c.synthesis.task, asyncio.Task) and not c.synthesis.task.done():
+                c.synthesis.interrupted = True
+                c.synthesis.task.cancel()
             c.synthesis.done = True
             if not c.synthesis.finalized: self.commit_council_member(c, c.synthesis)
             ui.notify('Synthesis stopped', type='info')
@@ -987,7 +1098,7 @@ class ChatPageController:
         self.clear_edit_round_state()
         self.chat = ChatClient()
         self.storage['chat8'] = self.chat
-        self.state.url_attachments, self.state.edit_rounds, self.state.answer_timers, self.state.council_counts, self.state.councils = [], {}, {}, {}, []
+        self.state.url_attachments, self.state.edit_rounds, self.state.answer_timers, self.state.council_counts, self.state.councils, self.state.next_council_id = [], {}, {}, {}, [], 1
         self.reset_stream(invalidate=True)
         self.clear_rendered_messages()
         self.set_draft_text('')
@@ -1039,40 +1150,6 @@ class ChatPageController:
         if self.state.phase in {Phase.COUNCIL_STREAMING, Phase.COUNCIL_SYNTHESIZING} and (c := self.active_council()):
             for m in self.council_members(c):
                 if not m.finalized and m.token in self.refs.timer_labels: self.refs.timer_labels[m.token].text = self.timer_text(self.council_elapsed(m))
-
-    def build_header(self):
-        with ui.element('div').classes('fixed-header'):
-            with ui.row().classes('gap-2 p-2 w-full items-start'):
-                with ui.element('div').classes('relative'):
-                    self.refs.model_button = ui.button(self.model_button_text(), icon='smart_toy').props('dark outline dense color=white').classes('text-white w-72 header-control header-model-btn')
-                    with ui.menu() as self.refs.model_menu:
-                        self.refs.model_menu_body = ui.column().classes('gap-0 p-1')
-                self.refs.reasoning_select = ui.select(REASONING_LEVELS, label='Reasoning').props(P_PROPS).classes('text-white w-32 header-control').bind_value(self.state, 'reasoning')
-                with ui.element('div').classes('flex-grow relative'):
-                    self.refs.file_search = ui.input(placeholder='Search files or paste URL...').props(f'{P_PROPS} debounce=250 id=file-search').classes('w-full header-control')
-                    self.refs.file_results_container = ui.column().classes('file-results')
-                    self.refs.file_search.on_value_change(self.on_search)
-                    self.refs.file_search.on('keydown', self.on_file_search_keydown)
-        self.refresh_model_picker()
-
-    def build_chat(self):
-        with ui.element('div').classes('chat-stack'):
-            self.refs.container = ui.column().classes('chat-container').props(f'id=chat8-{time.time_ns()}')
-
-    def build_footer(self):
-        with ui.element('div').classes('chat-footer'):
-            with ui.column().classes('w-full gap-0'):
-                self.refs.attachments = ui.row().classes('pending-atts w-full px-3 gap-1 flex-wrap')
-                with ui.row().classes('w-full p-2 pt-2 gap-2 items-start'):
-                    self.refs.input_field = ui.textarea(placeholder='Type your message...').props(f'{P_PROPS} autogrow input-class="min-h-22 max-h-100" id=input-field').classes('flex-grow text-white').bind_value(self.state, 'draft')
-                    self.refs.input_field.on('keydown', self.on_input_keydown)
-                    with ui.element('div').classes('ctrl-grid'):
-                        self.refs.mode_select = ui.select(['chat+edit', 'chat', 'extract'], label='Mode').props(P_PROPS).classes('ctrl-tile text-white').bind_value(self.state, 'mode')
-                        with ui.element('div').classes('ctrl-stack'):
-                            self.refs.send_btn = ui.button('Send', on_click=lambda: self.send(), icon='send').props('color=primary').classes('ctrl-tile')
-                            self.refs.stop_btn = ui.button('Stop', on_click=self.stop_streaming, icon='stop').props('color=red').classes('ctrl-tile absolute inset-0')
-                        self.refs.back_btn = ui.button('Back', on_click=self.undo, icon='undo').props('color=orange').classes('ctrl-tile')
-                        ui.button('Clear', on_click=self.clear_chat, icon='delete').props('color=grey').classes('ctrl-tile')
 
     def mount(self):
         self.prune_edit_rounds(), self.prune_answer_timers(), self.settle_orphaned_stream(), self.settle_orphaned_councils()

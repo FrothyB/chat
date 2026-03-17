@@ -15,6 +15,7 @@ DEFAULT_MODEL = 'openai/gpt-5.4'
 DEFAULT_REASONING = 'medium'
 MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.4', 'openai/gpt-5.4-pro', 'x-ai/grok-4.20-beta', 'x-ai/grok-4.20-multi-agent-beta']
 REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high']
+MAX_ATTACHMENT_BYTES = 500 * 1024
 
 FILE_LIKE_EXTS = {'.py', '.pyw', '.ipynb', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.go', '.rs', '.cs', '.java', '.html', '.htm', '.css', '.md', '.markdown', '.txt', '.rst', '.json', '.yaml', '.yml', '.toml', '.sql', '.sh', '.bash', '.zsh', '.bat', '.ps1'}
 ATTACHMENTS_MARKER = '\n\nAttached attachments:\n'
@@ -69,6 +70,15 @@ class AttachmentService:
     @staticmethod
     def looks_like_url(v: str) -> bool:
         return _looks_like_url(v)
+    @staticmethod
+    def validate_file_attachment(path: str, base_path: str | None = None) -> str | None:
+        base, rel = Path(base_path).resolve() if base_path else BASE_DIR, (path or '').strip().replace('\\', '/')
+        if not rel: return 'Attachment path is empty'
+        p = Path(rel)
+        if p.is_absolute(): return f'Attachment must be relative: {rel}'
+        q = (base / p).resolve()
+        if not q.is_relative_to(base) or not q.is_file(): return f'Not a file: {rel}'
+        return f'Attachment exceeds 500KB: {rel}' if q.stat().st_size > MAX_ATTACHMENT_BYTES else None
 
     @staticmethod
     def search_files(query: str, base_path: str | None = None, max_results: int = 20) -> list[str]:
@@ -133,15 +143,10 @@ class AttachmentService:
                     try: pat = Path(pat).resolve().relative_to(base).as_posix()
                     except Exception: return []
                 pats.append((to_regex(pat), '/' not in pat))
-            files = scan(False, False, pats=pats, term_set=terms_l)
-            if files: return sorted(set(files))[:max_results]
-            dirs = scan(True, False, pats=pats, term_set=terms_l)
-            return sorted(set(dirs))[:max_results]
+            return sorted(set(scan(False, False, pats=pats, term_set=terms_l)))[:max_results]
 
         files = scan(False, True) or (scan(False, False) if len(terms_l) > 1 else [])
-        if files: return sorted(set(files))[:max_results]
-        dirs = scan(True, True) or (scan(True, False) if len(terms_l) > 1 else [])
-        return sorted(set(dirs))[:max_results]
+        return sorted(set(files))[:max_results]
 
     @staticmethod
     def read_files(file_paths: list[str]) -> str:
@@ -158,6 +163,15 @@ class AttachmentService:
                 out.append(f'### {name}\nError: path escapes base dir\n')
                 continue
             try:
+                if not p.exists():
+                    out.append(f'### {name}\nError: file does not exist\n')
+                    continue
+                if not p.is_file():
+                    out.append(f'### {name}\nError: not a file\n')
+                    continue
+                if p.stat().st_size > MAX_ATTACHMENT_BYTES:
+                    out.append(f'### {name}\nError: attachment exceeds 500KB\n')
+                    continue
                 if p.name.endswith('.ipynb'):
                     nb = json.loads(p.read_text(encoding='utf-8'))
                     cells = []
@@ -177,7 +191,9 @@ class AttachmentService:
 
     @staticmethod
     async def fetch_url_content(url: str) -> str:
-        return await _fetch_url_content(url)
+        content = await _fetch_url_content(url)
+        if len(content.encode('utf-8')) > MAX_ATTACHMENT_BYTES: raise ValueError('Attachment exceeds 500KB')
+        return content
 
 
 def search_files(query: str, base_path: str | None = None, max_results: int = 20) -> list[str]:
@@ -393,6 +409,7 @@ class EditService:
             if blk.occ: core += f' {blk.occ}'
             return f'{rel}: {core}'
 
+        # Intentionally apply repeated edit sections for the same file sequentially against the latest mutated buffer.
         for d in directives:
             try:
                 full_edit = d.full_new is not None and not d.replaces
@@ -433,11 +450,11 @@ class EditService:
                 lines = norm.split('\n')
                 if had_final_nl: lines = lines[:-1]
 
-                spans, failed_here = [], []
+                updated_lines, applied, failed_here = lines[:], 0, []
                 for blk in d.replaces:
                     new_norm = self._norm_newlines(blk.new).rstrip('\n')
                     new_lines = [] if new_norm == '' else new_norm.split('\n')
-                    if not (span := self._find_anchor_span(lines, blk.x, blk.y, single=blk.single, occ=blk.occ)):
+                    if not (span := self._find_anchor_span(updated_lines, blk.x, blk.y, single=blk.single, occ=blk.occ)):
                         failed_here.append(blk)
                         continue
                     a, b = span
@@ -445,19 +462,10 @@ class EditService:
                     elif blk.op == 'insert_after': i0, i1 = b, b
                     elif blk.op == 'insert_before': i0, i1 = a - 1, a - 1
                     else: raise RuntimeError(f'Unknown op: {blk.op}')
-                    spans.append((i0, i1, new_lines, blk))
-
-                if not spans:
-                    for blk in failed_here: failed_cmds.append(fmt_cmd(rel, blk))
-                    results.append(EditEvent('error', Path(rel).name, 'No edit blocks uniquely matched anchors (X/Y) in file', rel))
-                    continue
-
-                spans.sort(key=lambda t: (t[0], t[1]))
-                for (a1, b1, _, _), (a2, b2, _, _) in zip(spans, spans[1:]):
-                    if a2 < b1: raise RuntimeError(f'Overlapping edit ranges: {a1 + 1}-{b1} and {a2 + 1}-{b2}')
-
-                updated_lines = lines[:]
-                for i0, i1, new_lines, _ in sorted(spans, key=lambda t: (t[0], t[1]), reverse=True): updated_lines[i0:i1] = new_lines
+                    next_lines = updated_lines[:]
+                    next_lines[i0:i1] = new_lines
+                    if next_lines != updated_lines: applied += 1
+                    updated_lines = next_lines
 
                 updated_norm = '\n'.join(updated_lines) + ('\n' if had_final_nl else '')
                 updated = updated_norm if eol == '\n' else updated_norm.replace('\n', '\r\n')
@@ -471,7 +479,7 @@ class EditService:
                 tx['changed'].add(rel)
                 for blk in failed_here: failed_cmds.append(fmt_cmd(rel, blk))
                 kind, extra = ('partial' if failed_here else 'complete'), (f', {len(failed_here)} failed' if failed_here else '')
-                results.append(EditEvent(kind, Path(rel).name, f'applied {len(spans)} edit(s){extra}: {self._count_lines_norm(original)} → {self._count_lines_norm(updated)} lines', rel))
+                results.append(EditEvent(kind, Path(rel).name, f'applied {applied} edit(s){extra}: {self._count_lines_norm(original)} → {self._count_lines_norm(updated)} lines', rel))
             except Exception as e:
                 results.append(EditEvent('error', Path(d.filename).name, f'Error: {e}', d.filename))
 
@@ -662,6 +670,9 @@ class ChatClient:
     @staticmethod
     def looks_like_url(v: str) -> bool:
         return AttachmentService.looks_like_url(v)
+    @staticmethod
+    def validate_file_attachment(path: str) -> str | None:
+        return AttachmentService.validate_file_attachment(path)
 
     async def fetch_url_content(self, url: str) -> str:
         return await AttachmentService.fetch_url_content(url)
@@ -693,9 +704,15 @@ class ChatClient:
     def _refresh_last_assistant_index(self):
         self._last_assistant_index = next((i for i in range(len(self.messages) - 1, -1, -1) if self.messages[i].get('role') == 'assistant'), None)
 
+    # Intentionally reuse the most recent attached-file context so later edit rounds can keep targeting earlier files without reattaching them.
     def _latest_context_files(self) -> list[str]:
         if not self.message_files: return []
         return self.message_files.get(max(self.message_files.keys()), []) or []
+    def context_files_for_assistant(self, assistant_index: int | None = None) -> list[str]:
+        ai = self._last_assistant_index if assistant_index is None else assistant_index
+        if ai is None or not (0 <= ai < len(self.messages)) or self.messages[ai].get('role') != 'assistant': return []
+        ui = ai - 1
+        return (self.message_files.get(ui, []) or []).copy() if ui >= 0 and self.messages[ui].get('role') == 'user' else []
 
     def new_display_renderer(self, ctx_files: list[str] | None = None) -> DisplayRenderer:
         return self.edit_service.new_display_renderer(ctx_files if ctx_files is not None else self._latest_context_files())
@@ -774,8 +791,8 @@ class ChatClient:
     
     def stream_message_with_history(self, request_user_msg: str, history_user_msg: str, model: str = DEFAULT_MODEL, reasoning: str = DEFAULT_REASONING, force_edit: bool = False, attachments: list[dict[str, str]] | None = None, display_user: str | None = None, restore_user: str | None = None) -> AsyncGenerator[str | ReasoningEvent, None]:
         base_messages, chat_injected, edit_injected = [dict(m) for m in self.messages], self._chat_prompt_injected, self._edit_prompt_injected
-        request_content, _, _, next_chat_injected, next_edit_injected = self._compose_user_content_state(request_user_msg, force_edit=force_edit, attachments=attachments, chat_injected=chat_injected, edit_injected=edit_injected)
-        history_content, files, atts, _, _ = self._compose_user_content_state(history_user_msg, force_edit=force_edit, attachments=attachments, chat_injected=chat_injected, edit_injected=edit_injected)
+        request_content, _, _, _, _ = self._compose_user_content_state(request_user_msg, force_edit=force_edit, attachments=attachments, chat_injected=chat_injected, edit_injected=edit_injected)
+        history_content, files, atts, next_chat_injected, next_edit_injected = self._compose_user_content_state(history_user_msg, force_edit=force_edit, attachments=attachments, chat_injected=chat_injected, edit_injected=edit_injected)
         self._chat_prompt_injected, self._edit_prompt_injected = next_chat_injected, next_edit_injected
 
         msg_index = len(self.messages)
@@ -829,7 +846,7 @@ class ChatClient:
 
     def apply_markdown_edits(self, md: str, assistant_index: int | None = None) -> list[EditEvent]:
         ai = assistant_index if assistant_index is not None else self._last_assistant_index
-        events, prefill = self.edit_service.apply_markdown_edits(md, ai, self._latest_context_files())
+        events, prefill = self.edit_service.apply_markdown_edits(md, ai, self.context_files_for_assistant(ai))
         self.edited_files = self.edit_service.edited_files
         self.edit_transactions = self.edit_service.transactions
         if prefill: self._user_input_prefill = prefill
