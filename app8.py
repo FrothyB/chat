@@ -17,7 +17,6 @@ from chat_utils3 import (
     EXTRACT_ADD_ON,
     MODELS,
     REASONING_LEVELS,
-    STYLE_CSS,
     AssistantTurn,
     Attachment,
     ChatClient,
@@ -143,6 +142,7 @@ class ChatPageView:
     def append_markdown(self, content_id: str, chunk: str): self.js_call('appendMarkdown', content_id, chunk)
     def focus_input(self): ui.run_javascript('document.getElementById("input-field")?.querySelector("textarea")?.focus()')
     def focus_file_search(self): ui.run_javascript('document.querySelector("#file-search")?.focus()')
+    def scroll_bottom(self): self.js_call('scrollBottom')
 
     def scroll_active_into_view(self):
         p = self.page
@@ -276,6 +276,7 @@ class ChatPageView:
             for m in e.members: self.render_message(p.council_member_token(e, m), 'assistant', p.assistant_display(m), m.label or m.model, timer_id=m.id, timer_value=p.assistant_timer_value(m.id))
             if e.synthesis: self.render_message(p.council_synthesis_token(e), 'assistant', p.assistant_display(e.synthesis), e.synthesis.label or e.synthesis.model, assistant_id=e.synthesis.id, timer_id=e.synthesis.id, timer_value=p.assistant_timer_value(e.synthesis.id))
         self.update_controls()
+        self.scroll_bottom()
 
     def render_search_results(self):
         p = self.page
@@ -859,7 +860,6 @@ class ChatPageController:
 
 @ui.page('/')
 async def main_page():
-    ui.add_head_html(STYLE_CSS)
     ui.add_head_html(HEAD_ASSETS)
     await ui.context.client.connected()
     ChatPageController.load(app.storage.tab).mount()

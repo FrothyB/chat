@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Literal
 
 from openai import AsyncOpenAI
-from stuff import CHAT_PROMPT, EDIT_PROMPT, EXTRACT_ADD_ON, STYLE_CSS
+from stuff import CHAT_PROMPT, EDIT_PROMPT, EXTRACT_ADD_ON
 from url_utils import fetch_url_content as _fetch_url_content, looks_like_url as _looks_like_url, normalize_url as _normalize_url
 
 API_KEY = os.getenv('OPENROUTER_API_KEY')
@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_MODEL = 'openai/gpt-5.4'
 DEFAULT_REASONING = 'medium'
-MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.4', 'openai/gpt-5.4-pro', 'x-ai/grok-4.20-beta', 'x-ai/grok-4.20-multi-agent-beta']
+MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.4', 'openai/gpt-5.4-pro', 'openai/gpt-5.4-mini', 'anthropic/claude-4.6-opus', 'x-ai/grok-4.20-multi-agent-beta']
 REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high']
 MAX_ATTACHMENT_BYTES = 500 * 1024
 
@@ -448,6 +448,43 @@ class EditService:
             op, core = {'replace': 'Replace', 'insert_after': 'Insert After', 'insert_before': 'Insert Before'}.get(blk.op, blk.op), f'`{blk.x}`' if blk.single else f'`{blk.x}`-`{blk.y}`'
             return f'{rel}: {op} {core}' + (f' {blk.occ}' if blk.occ else '')
 
+        def cur_loc(span: tuple[int, int], op: str) -> tuple[int, int]:
+            a, b = span
+            return (a - 1, b) if op == 'replace' else (b, b) if op == 'insert_after' else (a - 1, a - 1)
+
+        def orig_loc(m: list[int | None], span: tuple[int, int], op: str) -> tuple[int, int, int, int] | None:
+            a, b = span
+            s, t = (a - 1, b) if op == 'replace' else (b, b) if op == 'insert_after' else (a - 1, a - 1)
+            i0, i1 = m[s], m[t]
+            return None if i0 is None or i1 is None else (i0, i1, s, t)
+
+        def rebase(m: list[int | None], i0: int, i1: int, k: int, op: str, s: int | None = None, t: int | None = None):
+            d = k - (i1 - i0)
+            for j, v in enumerate(m):
+                if v is None: continue
+                if s is not None:
+                    if op == 'replace':
+                        if j < s: continue
+                        if j == s: m[j] = i0
+                        elif j == t: m[j] = i0 + k
+                        elif s < j < t: m[j] = None
+                        elif j > t and v >= i1: m[j] = v + d
+                    elif op == 'insert_before':
+                        if j >= s: m[j] = v + k
+                    elif j > t:
+                        m[j] = v + k
+                    continue
+                if op == 'replace':
+                    if i0 < v < i1: m[j] = None
+                    elif v == i1: m[j] = i0 + k
+                    elif v > i1: m[j] = v + d
+                elif op == 'insert_before':
+                    if v >= i0: m[j] = v + k
+                elif v > i0:
+                    m[j] = v + k
+            op, core = {'replace': 'Replace', 'insert_after': 'Insert After', 'insert_before': 'Insert Before'}.get(blk.op, blk.op), f'`{blk.x}`' if blk.single else f'`{blk.x}`-`{blk.y}`'
+            return f'{rel}: {op} {core}' + (f' {blk.occ}' if blk.occ else '')
+
         for d in directives:
             try:
                 full_edit = d.full_new is not None and not d.replaces
@@ -482,19 +519,24 @@ class EditService:
                 lines = norm.split('\n')
                 if had_final_nl: lines = lines[:-1]
 
-                updated_lines, applied, failed_here = lines[:], 0, []
+                updated_lines, applied, failed_here, orig_pos = lines[:], 0, [], list(range(len(lines) + 1))
                 for blk in d.replaces:
                     new_norm = self._norm_newlines(blk.new).rstrip('\n')
                     new_lines = [] if new_norm == '' else new_norm.split('\n')
-                    if not (span := self._find_anchor_span(updated_lines, blk.x, blk.y, single=blk.single, occ=blk.occ)):
+                    if (span := self._find_anchor_span(lines, blk.x, blk.y, single=blk.single, occ=blk.occ)) and (loc := orig_loc(orig_pos, span, blk.op)):
+                        i0, i1, s, t = loc
+                        from_orig = True
+                    elif span := self._find_anchor_span(updated_lines, blk.x, blk.y, single=blk.single, occ=blk.occ):
+                        i0, i1 = cur_loc(span, blk.op)
+                        from_orig = False
+                    else:
                         failed_here.append(blk)
                         continue
-                    a, b = span
-                    i0, i1 = (a - 1, b) if blk.op == 'replace' else (b, b) if blk.op == 'insert_after' else (a - 1, a - 1) if blk.op == 'insert_before' else (_ for _ in ()).throw(RuntimeError(f'Unknown op: {blk.op}'))
                     next_lines = updated_lines[:]
                     next_lines[i0:i1] = new_lines
                     if next_lines != updated_lines: applied += 1
                     updated_lines = next_lines
+                    rebase(orig_pos, i0, i1, len(new_lines), blk.op, s, t) if from_orig else rebase(orig_pos, i0, i1, len(new_lines), blk.op)
 
                 updated_norm = '\n'.join(updated_lines) + ('\n' if had_final_nl else '')
                 updated = updated_norm if eol == '\n' else updated_norm.replace('\n', '\r\n')
