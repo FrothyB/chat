@@ -37,6 +37,7 @@ MD_CLASSES = 'chat7-md max-w-none break-words'
 STATIC_DIR = Path(__file__).with_name('static')
 STATIC_V = max((p.stat().st_mtime_ns for p in STATIC_DIR.glob('chat7.*')), default=0)
 HEAD_ASSETS = f'''
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/markdown-it-texmath/css/texmath.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/github-dark.min.css">
@@ -252,13 +253,13 @@ class ChatPageView:
                 ui.label(label).classes('self-end text-[11px] text-gray-500 px-1' if role == 'user' else 'text-[11px] text-gray-500 px-1')
                 if role == 'user':
                     with ui.element('div').classes('flex justify-end mb-1'):
-                        with ui.element('div').classes('inline-block bg-blue-600 rounded-lg px-3 py-2 max-w-full min-w-0 user-bubble'):
+                        with ui.element('div').classes('inline-block rounded-lg px-3 py-2 max-w-full min-w-0 user-bubble'):
                             ui.element('div').props(f'id={content_id}').classes(f'{MD_CLASSES} text-white')
                     with ui.element('div').classes('flex justify-end mb-3'):
                         self.build_tools(content_id, atts=atts)
                 else:
                     with ui.element('div').classes('flex justify-start mb-1'):
-                        with ui.element('div').classes('bg-gray-800 rounded-lg px-3 py-2 w-full min-w-0 answer-bubble'):
+                        with ui.element('div').classes('rounded-lg px-3 py-2 w-full min-w-0 answer-bubble'):
                             ui.element('div').props(f'id={content_id}').classes(f'{MD_CLASSES} text-white')
                     with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
                         self.build_tools(content_id, assistant_id=assistant_id, timer_id=timer_id, timer_value=timer_value)
