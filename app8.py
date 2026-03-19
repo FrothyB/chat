@@ -878,7 +878,7 @@ class ChatPageController:
         self.view.render_pending_attachments()
         if self.page.search_results: self.view.render_search_results()
         self.view.update_controls()
-        ui.timer(0.05, self.flush_updates)
+        ui.timer(1 / 60, self.flush_updates)
         ui.timer(1.0, self.tick_timer)
         if not (self.refs.input_field.value or '').strip() and (p := self.chat.consume_user_input_prefill()): self.set_draft_text(p)
 

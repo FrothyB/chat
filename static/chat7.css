@@ -63,9 +63,9 @@ body, .q-page {
 /* ── Chat Container ──────────────────────────────────── */
 
 .chat-container {
-  height: calc(100vh - 160px);
-  margin: 80px 0;
-  padding: 1.5rem 1.25rem;
+  height: calc(100vh - 144px);
+  margin: 64px 0 80px;
+  padding: .75rem 1.25rem 1.5rem;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: thin;
@@ -426,7 +426,14 @@ pre:hover .code-copy-btn { opacity: 1; }
 .chat7-md h4 { font-size: 1.05rem; }
 .chat7-md h5, .chat7-md h6 { font-size: .95rem; color: var(--text-dim); }
 
-.chat7-md ul, .chat7-md ol { padding-left: 1.35rem; }
+.chat7-md ul, .chat7-md ol { padding-left: 1.35rem; list-style-position: outside; }
+.chat7-md li { display: list-item; }
+.chat7-md ul > li { list-style-type: disc; }
+.chat7-md ul ul > li { list-style-type: circle; }
+.chat7-md ul ul ul > li { list-style-type: square; }
+.chat7-md ol > li { list-style-type: decimal; }
+.chat7-md ol ol > li { list-style-type: lower-alpha; }
+.chat7-md ol ol ol > li { list-style-type: lower-roman; }
 .chat7-md li + li { margin-top: .25rem; }
 .chat7-md li::marker { color: var(--muted); }
 

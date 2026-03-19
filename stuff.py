@@ -31,7 +31,9 @@ Your answer will be markdown formatted. As such, you always use:
 Inline code specifiers (`) or fences (```) for code, specifying the language for fences;
 LaTeX with single (inline) or double (display) dollar sign delimiters for mathematical expressions, and never any other delimiter - only $/$$ are supported;
 Single-letter variable names for maths;
-Markdown tables and mermaid diagrams when appropriate, with quotes for mermaid labels.'''
+Markdown tables and mermaid diagrams when appropriate, with quotes for mermaid labels.
+---
+'''
 
 EDIT_PROMPT = '''If explicitly instructed to edit files, use Edit sections:
 
@@ -60,7 +62,9 @@ Identify a suitable location for new files, typically in the same directory as r
 
 Before beginning your answer, plan commands and their types thoroughly to adhere to all the above rules.
 You may create new files to implement new functionality or to refactor existing code.
-Remember that earlier modifications will now be part of the file.'''
+Remember that earlier modifications will now be part of the file.
+---
+'''
 
 EXTRACT_ADD_ON = '''
 For this message only, enter extract mode. Read the attached files and produce a concise, comprehensive report that gathers and presents all relevant information needed to address your colleague's request.

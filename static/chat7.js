@@ -95,21 +95,26 @@
   };
 
   const render = async node => {
-    if (!node) return;
+    if (!node || node._chat7Rendering) return;
     const atBottom = sticky(node);
-    node._chat7Timer = 0;
+    node._chat7Frame = 0;
+    node._chat7Rendering = true;
     node._chat7Dirty = false;
-    node.innerHTML = window.DOMPurify.sanitize(md.render(safe(node._chat7Markdown || '')), {USE_PROFILES: {html: true, svg: true, mathMl: true}});
-    await mermaidize(node);
-    wrapTables(node);
-    decorateLinks(node);
-    decorateMedia(node);
-    bindCodeCopy(node);
-    if (atBottom) scrollBottom(node);
-    if (node._chat7Dirty && !node._chat7Timer) node._chat7Timer = setTimeout(() => render(node), 50);
+    try {
+      node.innerHTML = window.DOMPurify.sanitize(md.render(safe(node._chat7Markdown || '')), {USE_PROFILES: {html: true, svg: true, mathMl: true}});
+      await mermaidize(node);
+      wrapTables(node);
+      decorateLinks(node);
+      decorateMedia(node);
+      bindCodeCopy(node);
+      if (atBottom) scrollBottom(node);
+    } finally {
+      node._chat7Rendering = false;
+      if (node._chat7Dirty && !node._chat7Frame) node._chat7Frame = requestAnimationFrame(() => render(node));
+    }
   };
 
-  const schedule = node => { if (!node) return; node._chat7Dirty = true; if (!node._chat7Timer) node._chat7Timer = setTimeout(() => render(node), 50); };
+  const schedule = node => { if (!node) return; node._chat7Dirty = true; if (!node._chat7Frame && !node._chat7Rendering) node._chat7Frame = requestAnimationFrame(() => render(node)); };
 
   window.chat7 = {
     setMarkdown: (id, text, now=false) => withNode(id, node => { node._chat7Markdown = text || ''; now ? render(node) : schedule(node); }),

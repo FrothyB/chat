@@ -316,6 +316,12 @@ class EditService:
         if not (m2 := cls._FENCE_CLOSE_RE.search(text, m.end())): return None
         body = text[m.end():m2.start()]
         return (m.group(1) or '').strip(), body[1:] if body.startswith('\n') else body, m2.end()
+    @classmethod
+    def _parse_full_edit_fence(cls, text: str) -> tuple[str, str, int] | None:
+        text = cls._norm_newlines(text).strip()
+        if not text or not cls._FENCE_OPEN_RE.match(text): return None
+        if not (f := cls._parse_fence_from(text, 0)) or text[f[2]:].strip(): return None
+        return f
 
     @classmethod
     def _parse_header_match(cls, op: str, m: re.Match) -> tuple[str, str, bool, int | None, str]:
@@ -421,8 +427,7 @@ class EditService:
                 x, y, single, n, _ = self._parse_header_match(op or 'replace', hdr)
                 replaces.append(ReplaceBlock(x=x, y=y, single=single, occ=n, new=f[1], lang=(f[0] or '').strip(), op=op or 'replace'))
                 pos = f[2]
-            has_cmd = any(rx.search(section) for _, rx, _ in self._HEADER_SPECS)
-            if not replaces and not has_cmd and (f := self._parse_fence_from(section, 0)): full_new = f[1]
+            if not replaces and (f := self._parse_full_edit_fence(section)): full_new = f[1]
             cuts = [x.start() for x in [self._REPLACE_HDR_RE.search(section), self._INSERT_AFTER_HDR_RE.search(section), self._INSERT_BEFORE_HDR_RE.search(section), self._FENCE_OPEN_RE.search(section)] if x]
             expl = section[:min(cuts)].strip() if cuts else section.strip()
             if replaces or full_new is not None: out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces, full_new=full_new))
