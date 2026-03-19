@@ -123,6 +123,7 @@ class UiRefs:
     content_ids: dict[str, str] = field(default_factory=dict)
     edit_slots: dict[str, Any] = field(default_factory=dict)
     timer_labels: dict[str, Any] = field(default_factory=dict)
+    status_chips: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
 
 
@@ -157,7 +158,7 @@ class ChatPageView:
     def clear_rendered_messages(self):
         p = self.page
         if p.refs.container: p.refs.container.clear()
-        p.refs.nodes.clear(), p.refs.content_ids.clear(), p.refs.edit_slots.clear(), p.refs.timer_labels.clear(), p.refs.order.clear()
+        p.refs.nodes.clear(), p.refs.content_ids.clear(), p.refs.edit_slots.clear(), p.refs.timer_labels.clear(), p.refs.status_chips.clear(), p.refs.order.clear()
 
     def update_controls(self):
         p, phase = self.page, self.page.phase()
@@ -224,9 +225,27 @@ class ChatPageView:
                         ui.icon(icon).classes(cls)
                         ui.label(Path(it.label).name or it.label).classes('tool-att-label text-gray-300')
 
-    def build_tools(self, content_id: str, atts: list[Attachment] | None = None, assistant_id: str | None = None, timer_id: str | None = None, timer_value: int | None = None):
+    def robot_chip(self, kind: str):
+        chip = ui.element('div').classes(f'robot-chip robot-chip-{kind}')
+        with chip:
+            ui.element('div').classes('robot-chip-halo')
+            with ui.element('div').classes('robot-chip-head'):
+                ui.element('div').classes('robot-chip-antenna')
+                with ui.element('div').classes('robot-chip-eyes'):
+                    ui.element('div').classes('robot-chip-eye')
+                    ui.element('div').classes('robot-chip-eye')
+                ui.element('div').classes('robot-chip-mouth')
+        return chip
+
+    def set_assistant_status(self, assistant_id: str, status: str | None):
+        if not (chips := self.page.refs.status_chips.get(assistant_id)): return
+        chips[0].set_visibility(status == 'thinking')
+        chips[1].set_visibility(status == 'answering')
+    def build_tools(self, content_id: str, atts: list[Attachment] | None = None, assistant_id: str | None = None, timer_id: str | None = None, timer_value: int | None = None, status_id: str | None = None):
         p = self.page
         with ui.element('div').classes('answer-tools flex items-center gap-2 flex-wrap'):
+            if status_id:
+                t, a = self.robot_chip('thinking'), self.robot_chip('answering'); t.set_visibility(False); a.set_visibility(False); p.refs.status_chips[status_id] = (t, a)
             ui.button('', on_click=lambda i=content_id, b=f'{content_id}-copy': self.js_call('copyMarkdown', i, b)).props(f'icon=content_copy flat dense size=sm id={content_id}-copy').classes('tool-btn copy-icon')
             for a in atts or []:
                 text = Path(a.path).name if a.kind == 'file' else a.url
@@ -262,7 +281,7 @@ class ChatPageView:
                         with ui.element('div').classes('rounded-lg px-3 py-2 w-full min-w-0 answer-bubble'):
                             ui.element('div').props(f'id={content_id}').classes(f'{MD_CLASSES} text-white')
                     with ui.element('div').classes('flex justify-start answer-tools-row mb-3'):
-                        self.build_tools(content_id, assistant_id=assistant_id, timer_id=timer_id, timer_value=timer_value)
+                        self.build_tools(content_id, assistant_id=assistant_id, timer_id=timer_id, timer_value=timer_value, status_id=timer_id)
         self.set_markdown(content_id, content, True)
 
     def render_history(self):
@@ -276,6 +295,7 @@ class ChatPageView:
             self.render_message(p.council_user_token(e), 'user', e.query.display_text, 'You · council', e.query.attachments)
             for m in e.members: self.render_message(p.council_member_token(e, m), 'assistant', p.assistant_display(m), m.label or m.model, timer_id=m.id, timer_value=p.assistant_timer_value(m.id))
             if e.synthesis: self.render_message(p.council_synthesis_token(e), 'assistant', p.assistant_display(e.synthesis), e.synthesis.label or e.synthesis.model, assistant_id=e.synthesis.id, timer_id=e.synthesis.id, timer_value=p.assistant_timer_value(e.synthesis.id))
+        for aid in list(p.refs.status_chips): self.set_assistant_status(aid, p.assistant_status(aid))
         self.update_controls()
         self.scroll_bottom()
 
@@ -387,6 +407,8 @@ class ChatPageController:
 
     def assistant_timer_value(self, assistant_id: str) -> int:
         return self.run_elapsed(r) if (r := self.run_for_assistant(assistant_id)) else max(0, int((self.locate_assistant(assistant_id)[1] or AssistantTurn('', '', '')).elapsed))
+    
+    def assistant_status(self, assistant_id: str) -> str | None: return 'answering' if (r := self.run_for_assistant(assistant_id)) and r.has_answer else 'thinking' if r else None
 
     def file_ctx(self, atts: list[Attachment]) -> list[str]:
         return list(dict.fromkeys(a.path.strip().replace('\\', '/') for a in atts if a.kind == 'file' and a.path.strip()))
@@ -509,6 +531,7 @@ class ChatPageController:
         a.elapsed, a.finalized, a.interrupted, a.error = self.run_elapsed(r), True, r.interrupted, r.error
         if token in self.refs.content_ids and not r.has_answer: self.view.set_markdown(self.refs.content_ids[token], display, True)
         if a.id in self.refs.timer_labels: self.refs.timer_labels[a.id].text = self.timer_text(a.elapsed)
+        self.view.set_assistant_status(a.id, None)
         self.drop_run(r)
         if r.error: ui.notify(f'{a.label or a.model}: {r.error}', type='negative')
         if isinstance(e, ExchangeEntry):
@@ -827,6 +850,7 @@ class ChatPageController:
     def flush_updates(self):
         for r in [x for x in [self.runs.exchange_run, self.runs.synthesis_run, *self.runs.member_runs.values()] if x]:
             _, a, token, _ = self.locate_assistant(r.target_id)
+            self.view.set_assistant_status(r.target_id, 'answering' if r.has_answer else 'thinking')
             if token in self.refs.content_ids:
                 content_id = self.refs.content_ids[token]
                 if r.reset_display:

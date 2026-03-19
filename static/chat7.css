@@ -175,6 +175,149 @@ body, .q-page {
   opacity: .7;
 }
 
+.robot-chip {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.95rem; height: 1.95rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(129, 140, 248, .26);
+  background: linear-gradient(180deg, rgba(20,27,44,.98), rgba(12,17,28,.98));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 1px rgba(99,102,241,.05);
+  overflow: hidden;
+}
+
+.robot-chip::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(135deg, rgba(255,255,255,.14), transparent 42%, transparent 62%, rgba(99,102,241,.08));
+  pointer-events: none;
+}
+
+.robot-chip-thinking { border-color: rgba(125, 211, 252, .28); }
+.robot-chip-answering { border-color: rgba(129, 140, 248, .34); }
+
+.robot-chip-halo {
+  position: absolute; inset: -35%;
+  border-radius: inherit;
+  filter: blur(4px);
+  opacity: .55;
+  animation: robotHalo 1.8s ease-in-out infinite;
+}
+
+.robot-chip-thinking .robot-chip-halo { background: radial-gradient(circle, rgba(125,211,252,.34), transparent 62%); }
+.robot-chip-answering .robot-chip-halo { background: radial-gradient(circle, rgba(129,140,248,.38), transparent 62%); animation-duration: 1s; }
+
+.robot-chip-head {
+  position: relative;
+  width: .98rem; height: .78rem;
+  border-radius: .28rem;
+  background: linear-gradient(180deg, #e0e7ff, #93c5fd);
+  box-shadow: 0 .05rem .16rem rgba(0,0,0,.28);
+}
+
+.robot-chip-thinking .robot-chip-head { animation: robotThink 1.5s ease-in-out infinite; }
+.robot-chip-answering .robot-chip-head { animation: robotBounce .8s ease-in-out infinite; }
+
+.robot-chip-antenna {
+  position: absolute; left: 50%; top: -.24rem;
+  width: .11rem; height: .22rem;
+  transform: translateX(-50%);
+  border-radius: 9999px;
+  background: #c4b5fd;
+}
+
+.robot-chip-antenna::after {
+  content: '';
+  position: absolute; left: 50%; top: -.1rem;
+  width: .24rem; height: .24rem;
+  transform: translateX(-50%);
+  border-radius: 9999px;
+  background: #67e8f9;
+  box-shadow: 0 0 .35rem rgba(103,232,249,.75);
+}
+
+.robot-chip-thinking .robot-chip-antenna { animation: robotScan 1.1s ease-in-out infinite; }
+
+.robot-chip-eyes {
+  position: absolute; left: 50%; top: .18rem;
+  display: flex; gap: .14rem;
+  transform: translateX(-50%);
+}
+
+.robot-chip-eye {
+  width: .14rem; height: .14rem;
+  border-radius: 9999px;
+  background: #0f172a;
+  box-shadow: 0 0 .24rem rgba(34,211,238,.7);
+  animation: robotBlink 2.4s linear infinite;
+}
+
+.robot-chip-eyes > :nth-child(2) { animation-delay: .16s; }
+
+.robot-chip-answering .robot-chip-eye {
+  box-shadow: 0 0 .24rem rgba(129,140,248,.75);
+  animation: robotBlink 2.4s linear infinite, robotGlow .7s ease-in-out infinite alternate;
+}
+
+.robot-chip-mouth {
+  position: absolute; left: 50%; bottom: .14rem;
+  width: .18rem; height: .18rem;
+  transform: translateX(-50%);
+  border-radius: 9999px;
+  background: #0f172a;
+  box-shadow: 0 0 .22rem rgba(125,211,252,.55);
+}
+
+.robot-chip-thinking .robot-chip-mouth { animation: robotPonder 1.1s ease-in-out infinite; }
+
+.robot-chip-answering .robot-chip-mouth {
+  width: .42rem; height: .11rem;
+  border-radius: 9999px;
+  box-shadow: 0 0 .22rem rgba(129,140,248,.65);
+  animation: robotSpeak .62s ease-in-out infinite;
+}
+
+@keyframes robotHalo {
+  0%, 100% { transform: scale(.72); opacity: .3; }
+  50% { transform: scale(1); opacity: .7; }
+}
+
+@keyframes robotThink {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  25% { transform: translateY(-.02rem) rotate(-5deg); }
+  75% { transform: translateY(-.02rem) rotate(5deg); }
+}
+
+@keyframes robotScan {
+  0%, 100% { transform: translateX(-50%) rotate(0deg); }
+  50% { transform: translateX(-50%) rotate(12deg); }
+}
+
+@keyframes robotBlink {
+  0%, 44%, 100% { transform: scaleY(1); opacity: 1; }
+  46%, 50% { transform: scaleY(.12); opacity: .65; }
+}
+
+@keyframes robotGlow {
+  from { box-shadow: 0 0 .14rem rgba(129,140,248,.45); }
+  to { box-shadow: 0 0 .34rem rgba(129,140,248,.95); }
+}
+
+@keyframes robotPonder {
+  0%, 100% { transform: translateX(-50%) scale(.9); opacity: .72; }
+  50% { transform: translateX(-50%) scale(1.18); opacity: 1; }
+}
+
+@keyframes robotBounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-.08rem); }
+}
+
+@keyframes robotSpeak {
+  0%, 100% { width: .42rem; height: .11rem; border-radius: 9999px; }
+  50% { width: .3rem; height: .21rem; border-radius: .08rem; }
+}
+
 /* ── Attachment Pills ────────────────────────────────── */
 
 .tool-att, .pending-att {
