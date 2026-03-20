@@ -501,8 +501,8 @@ pre:hover .code-copy-btn { opacity: 1; }
 }
 
 .chat7-md .katex-display { overflow-x: auto; overflow-y: hidden; padding-bottom: .1rem; }
-.chat7-md .katex { font-size: 1.04em; }
-.chat7-md .katex-display > .katex { font-size: 1.08em; }
+.chat7-md .katex { font-size: 1.2em; }
+.chat7-md .katex-display > .katex { font-size: 1.3em; }
 .chat7-md .mermaid { overflow: auto; }
 .chat7-md .mermaid svg { max-width: 100%; height: auto; }
 

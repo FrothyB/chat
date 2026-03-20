@@ -142,6 +142,8 @@ class ChatPageView:
 
     def set_markdown(self, content_id: str, text: str, now: bool = False): self.js_call('setMarkdown', content_id, text, now)
     def append_markdown(self, content_id: str, chunk: str): self.js_call('appendMarkdown', content_id, chunk)
+    def append_markdown_buffered(self, content_id: str, chunk: str): self.js_call('appendMarkdownBuffered', content_id, chunk)
+    def finish_markdown_buffered(self, content_id: str): self.js_call('finishMarkdownBuffered', content_id)
     def focus_input(self): ui.run_javascript('document.getElementById("input-field")?.querySelector("textarea")?.focus()')
     def focus_file_search(self): ui.run_javascript('document.querySelector("#file-search")?.focus()')
     def scroll_bottom(self): self.js_call('scrollBottom')
@@ -524,7 +526,8 @@ class ChatPageController:
             return
         if r.has_answer and r.renderer and hasattr(r.renderer, 'finish') and (delta := r.renderer.finish() or ''):
             a.display_text += delta
-            if token in self.refs.content_ids: self.view.append_markdown(self.refs.content_ids[token], delta)
+            if token in self.refs.content_ids: self.view.append_markdown_buffered(self.refs.content_ids[token], delta)
+        if r.has_answer and token in self.refs.content_ids: self.view.finish_markdown_buffered(self.refs.content_ids[token])
         raw = (r.raw_buffer or a.raw_text or '').rstrip() or 'Response stopped.'
         display = (a.display_text or '').rstrip() or (self.chat.render_for_display(raw, a.ctx_files) if r.has_answer else raw)
         a.raw_text, a.display_text, a.has_answer = raw, display, r.has_answer or bool((a.raw_text or '').strip())
@@ -863,7 +866,7 @@ class ChatPageController:
                 if r.has_answer and r.display_delta:
                     delta, r.display_delta = r.display_delta, ''
                     if a: a.display_text, a.raw_text = a.display_text + delta, r.raw_buffer
-                    self.view.append_markdown(content_id, delta)
+                    self.view.append_markdown_buffered(content_id, delta)
             if r.done: self.finalize_run(r)
 
     def tick_timer(self):
