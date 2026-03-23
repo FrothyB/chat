@@ -317,11 +317,11 @@ class EditService:
         body = text[m.end():m2.start()]
         return (m.group(1) or '').strip(), body[1:] if body.startswith('\n') else body, m2.end()
     @classmethod
-    def _parse_full_edit_fence(cls, text: str) -> tuple[str, str, int] | None:
+    def _parse_full_edit_fence(cls, text: str) -> tuple[str, str] | None:
         text = cls._norm_newlines(text).strip()
-        if not text or not cls._FENCE_OPEN_RE.match(text): return None
-        if not (f := cls._parse_fence_from(text, 0)) or text[f[2]:].strip(): return None
-        return f
+        if not text or any(rx.search(text) for _, rx, _ in cls._HEADER_SPECS): return None
+        if not (m := cls._FENCE_OPEN_RE.search(text)) or not (f := cls._parse_fence_from(text, m.start())) or text[f[2]:].strip(): return None
+        return text[:m.start()].strip(), f[1]
 
     @classmethod
     def _parse_header_match(cls, op: str, m: re.Match) -> tuple[str, str, bool, int | None, str]:
@@ -417,7 +417,7 @@ class EditService:
         text, edits, out = self._norm_newlines(md), list(self._EDIT_HDR_RE.finditer(self._norm_newlines(md))), []
         for i, m in enumerate(edits):
             filename, section = (m.group(1) or '').strip().replace('`', ''), text[m.end():(edits[i + 1].start() if i + 1 < len(edits) else len(text))].strip()
-            replaces, pos, full_new = [], 0, None
+            replaces, pos = [], 0
             while True:
                 op, hdr = self._next_hdr(section, pos)
                 if not hdr: break
@@ -427,10 +427,10 @@ class EditService:
                 x, y, single, n, _ = self._parse_header_match(op or 'replace', hdr)
                 replaces.append(ReplaceBlock(x=x, y=y, single=single, occ=n, new=f[1], lang=(f[0] or '').strip(), op=op or 'replace'))
                 pos = f[2]
-            if not replaces and (f := self._parse_full_edit_fence(section)): full_new = f[1]
+            full = None if replaces else self._parse_full_edit_fence(section)
             cuts = [x.start() for x in [self._REPLACE_HDR_RE.search(section), self._INSERT_AFTER_HDR_RE.search(section), self._INSERT_BEFORE_HDR_RE.search(section), self._FENCE_OPEN_RE.search(section)] if x]
-            expl = section[:min(cuts)].strip() if cuts else section.strip()
-            if replaces or full_new is not None: out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces, full_new=full_new))
+            expl = full[0] if full else section[:min(cuts)].strip() if cuts else section.strip()
+            if replaces or full: out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces, full_new=(full[1] if full else None)))
         return out
 
     def render_for_display(self, md: str, ctx_files: list[str] | None = None) -> str:
