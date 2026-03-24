@@ -59,20 +59,28 @@
   };
 
 
-  const B = {tps: 10, lag: 1000, tick: 33, start: 1000, span: 10, render: 33, drain: 500};
+  const B = {tps: 10, lag: 1000, tick: 33, start: 1000, span: 10, render: 33, drain: 250};
   const ema = (y, z, dt, s=B.span) => y ? y + (1 - (1 - 2 / (s + 1)) ** dt) * (z - y) : z;
-  const state = node => node._chat7Stream || (node._chat7Stream = {buf: [], startAt: 0, lastAt: 0, lastTick: 0, rate: 0, started: false, done: false, drainAt: 0, drainLen: 0, drainPos: 0, timer: 0});
-  const resetStream = node => { const x = state(node); if (x.timer) clearTimeout(x.timer); if (node._chat7Frame) cancelAnimationFrame(node._chat7Frame); if (node._chat7RenderTimer) clearTimeout(node._chat7RenderTimer); node._chat7Frame = 0; node._chat7RenderTimer = 0; node._chat7NextRenderAt = 0; node._chat7Stream = {buf: [], startAt: 0, lastAt: 0, lastTick: 0, rate: 0, started: false, done: false, drainAt: 0, drainLen: 0, drainPos: 0, timer: 0}; };
+  const state = node => node._chat7Stream || (node._chat7Stream = {buf: [], startAt: 0, lastAt: 0, lastTick: 0, rate: 0, started: false, done: false, drainAt: 0, drainLen: 0, drainPos: 0, drainRate: 0, credit: 0, timer: 0});
+  const resetStream = node => { const x = state(node); if (x.timer) clearTimeout(x.timer); if (node._chat7Frame) cancelAnimationFrame(node._chat7Frame); if (node._chat7RenderTimer) clearTimeout(node._chat7RenderTimer); node._chat7Frame = 0; node._chat7RenderTimer = 0; node._chat7NextRenderAt = 0; node._chat7Stream = {buf: [], startAt: 0, lastAt: 0, lastTick: 0, rate: 0, started: false, done: false, drainAt: 0, drainLen: 0, drainPos: 0, drainRate: 0, credit: 0, timer: 0}; };
   const live = node => { const x = state(node); return !!((x.startAt && !x.done) || x.buf.length || x.timer); };
   const arm = (node, delay=B.tick) => { const x = state(node); if (!x.timer) x.timer = setTimeout(() => pump(node), delay); };
   const pump = node => {
     const x = state(node), now = performance.now(), dt = x.lastTick ? Math.min(250, now - x.lastTick) : B.tick;
     x.timer = 0;
     x.lastTick = now;
-    if (!x.started) { const wait = x.startAt + B.start - now; if (wait > 0) return arm(node, wait); x.started = true; x.rate = Math.max(B.tps, x.buf.length / (B.start / 1000)); x.lastAt = now; }
+    if (!x.started) {
+      if (!x.done) {
+        const wait = x.startAt + B.start - now;
+        if (wait > 0) return arm(node, wait);
+        x.rate = Math.max(B.tps, x.buf.length / (B.start / 1000));
+      }
+      x.started = true;
+      x.lastAt = now;
+    }
     if (x.done && x.buf.length) {
-      if (!x.drainAt) x.drainAt = now, x.drainLen = x.buf.length, x.drainPos = 0;
-      const want = Math.floor((x.drainLen || x.buf.length) * Math.min(1, (now - x.drainAt) / B.drain)), n = want - x.drainPos;
+      if (!x.drainAt) x.drainAt = now, x.drainLen = x.buf.length, x.drainPos = 0, x.drainRate = x.drainLen / (B.drain / 1000);
+      const want = now - x.drainAt >= B.drain ? x.drainLen : Math.floor((now - x.drainAt) * x.drainRate / 1000), n = Math.min(x.buf.length, want - x.drainPos);
       if (!n) return arm(node);
       node._chat7Markdown = (node._chat7Markdown || '') + x.buf.splice(0, n).join('');
       x.drainPos += n;
@@ -81,7 +89,10 @@
     }
     const rate = Math.max(B.tps, x.rate || 0), target = rate * B.lag / 1000;
     if (x.buf.length) {
-      const n = Math.max(1, Math.min(x.buf.length, Math.round(Math.max(1, rate * dt / 1000 * Math.max(0.25, Math.min(2, x.buf.length / Math.max(1, target)))))));
+      x.credit += rate * dt / 1000 * Math.max(0.25, Math.min(2, x.buf.length / Math.max(1, target)));
+      const n = Math.min(x.buf.length, Math.floor(x.credit));
+      if (!n) return arm(node);
+      x.credit -= n;
       node._chat7Markdown = (node._chat7Markdown || '') + x.buf.splice(0, n).join('');
       schedule(node);
     }
@@ -91,12 +102,12 @@
     const x = state(node), now = performance.now();
     if (!x.startAt) x.startAt = now;
     x.buf.push(chunk);
-    x.done = false;
+    x.done = false; x.drainAt = 0; x.drainLen = 0; x.drainPos = 0; x.drainRate = 0;
     if (x.started && x.lastAt) { const dt = Math.max(1e-3, (now - x.lastAt) / 1000); x.rate = ema(x.rate, 1 / dt, dt); }
     if (x.started) x.lastAt = now;
     if (!x.timer) arm(node, x.started ? B.tick : Math.max(0, x.startAt + B.start - now));
   };
-  const finish = node => { const x = state(node), now = performance.now(); x.done = true; if (x.started) x.drainAt = now, x.drainLen = x.buf.length, x.drainPos = 0, x.buf.length ? arm(node, 0) : schedule(node); else if (!x.timer) arm(node, Math.max(0, x.startAt + B.start - now)); };
+  const finish = node => { const x = state(node), now = performance.now(); x.done = true; x.drainAt = 0; x.drainLen = 0; x.drainPos = 0; x.drainRate = 0; if (x.timer) clearTimeout(x.timer), x.timer = 0; if (!x.startAt) x.startAt = now; x.buf.length ? arm(node, 0) : schedule(node); };
   const mermaidize = async root => {
     const nodes = [];
     root.querySelectorAll('pre > code').forEach(code => {
