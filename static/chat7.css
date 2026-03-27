@@ -26,6 +26,12 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+html, body, #app, .q-layout, .q-page-container, .q-page {
+  height: 100%;
+  overflow: hidden;
+}
+
+body { margin: 0; }
 body, .q-page {
   background:
     radial-gradient(circle at top left, rgba(99,102,241,.025), transparent 40rem),
@@ -68,6 +74,7 @@ body, .q-page {
   padding: .75rem 1.25rem 1.5rem;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: rgba(100,116,139,.35) transparent;
 }
