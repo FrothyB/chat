@@ -13,11 +13,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_MODEL = 'openai/gpt-5.4'
 DEFAULT_REASONING = 'medium'
-MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.4', 'openai/gpt-5.4-pro', 'openai/gpt-5.4-mini', 'anthropic/claude-4.6-opus', 'x-ai/grok-4.20-multi-agent-beta']
-REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high']
+MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.4', 'openai/gpt-5.4-pro', 'openai/gpt-5.4-mini', 'anthropic/claude-4.7-opus', 'x-ai/grok-4.20-multi-agent-beta']
+REASONING_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh']
 MAX_ATTACHMENT_BYTES = 500 * 1024
 
-FILE_LIKE_EXTS = {'.py', '.pyw', '.ipynb', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.go', '.rs', '.cs', '.java', '.html', '.htm', '.css', '.md', '.markdown', '.txt', '.rst', '.json', '.yaml', '.yml', '.toml', '.sql', '.sh', '.bash', '.zsh', '.bat', '.ps1'}
+FILE_LIKE_EXTS = {'.py', '.pyw', '.ipynb', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.go', '.rs', '.cs', '.java', '.html', '.svelte', '.htm', '.css', '.md', '.markdown', '.txt', '.rst', '.json', '.yaml', '.yml', '.toml', '.sql', '.sh', '.bash', '.zsh', '.bat', '.ps1'}
 ATTACHMENTS_MARKER = '\n\nAttached attachments:\n'
 LANG_BY_EXT = {
     '.py': 'python', '.pyw': 'python', '.ipynb': 'json', '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
@@ -278,11 +278,13 @@ def read_files(file_paths: list[str]) -> str:
 
 class EditService:
     _EDIT_HDR_RE = re.compile(r'(?mi)^\s*#+\s*edit\s+(.+?)\s*$')
-    _REPLACE_HDR_RE = re.compile(r'(?mi)^\s*#+\s*replace\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
-    _INSERT_AFTER_HDR_RE = re.compile(r'(?mi)^\s*#+\s*insert\s+after\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
-    _INSERT_BEFORE_HDR_RE = re.compile(r'(?mi)^\s*#+\s*insert\s+before\s+`+([^\n`]*)`+\s*(?:(\d+)\s*)?(?:-\s*`+([^\n`]*)`+\s*(?:(\d+)\s*)?)?\s*$')
+    _REPLACE_HDR_RE = re.compile(r'(?mi)^\s*#+\s*replace\b(?P<rest>.*)$')
+    _INSERT_AFTER_HDR_RE = re.compile(r'(?mi)^\s*#+\s*insert\s+after\b(?P<rest>.*)$')
+    _INSERT_BEFORE_HDR_RE = re.compile(r'(?mi)^\s*#+\s*insert\s+before\b(?P<rest>.*)$')
     _FENCE_OPEN_RE = re.compile(r'(?m)^\s*```[ \t]*([^\n`]*)\s*$')
     _FENCE_CLOSE_RE = re.compile(r'(?m)^\s*```\s*$')
+    _TARGET_RE = re.compile(r'(`+)([^\n`]*)\1')
+    _OCC_RE = re.compile(r'(\d+)\s*$')
     _HEADER_SPECS = (('replace', _REPLACE_HDR_RE, 'Replace'), ('insert_after', _INSERT_AFTER_HDR_RE, 'Insert After'), ('insert_before', _INSERT_BEFORE_HDR_RE, 'Insert Before'))
     _HEADER_LABELS = {op: label for op, _, label in _HEADER_SPECS}
 
@@ -324,14 +326,37 @@ class EditService:
         return text[:m.start()].strip(), f[1]
 
     @classmethod
-    def _parse_header_match(cls, op: str, m: re.Match) -> tuple[str, str, bool, int | None, str]:
-        x, occ, y_raw = (m.group(1) or ''), (m.group(2) or '').strip(), m.group(3)
-        return x, (x if y_raw in {None, ''} else y_raw), (y_raw is None), (int(occ) if occ else None), cls._HEADER_LABELS[op]
+    def _split_header_range(cls, s: str) -> tuple[str, str | None]:
+        spans = [m.span() for m in cls._TARGET_RE.finditer(s)]
+        if len(spans) < 2: return s, None
+        for i, c in enumerate(s):
+            if c != '-' or any(a <= i < b for a, b in spans) or not any(b <= i for a, b in spans) or not any(a > i for a, b in spans): continue
+            return s[:i], s[i + 1:]
+        return s, None
+
+    @classmethod
+    def _parse_target(cls, s: str, take_last: bool) -> tuple[str, str] | None:
+        if not (ms := list(cls._TARGET_RE.finditer(s))): return None
+        m = ms[-1] if take_last else ms[0]
+        return m.group(2), s[m.end():]
+
+    @classmethod
+    def _parse_occ(cls, s: str) -> int | None:
+        return int(m.group(1)) if (m := cls._OCC_RE.search(s or '')) else None
+
+    @classmethod
+    def _parse_header_body(cls, op: str, rest: str) -> tuple[str, str, bool, int | None, str] | None:
+        left, right = cls._split_header_range(rest or '')
+        if right is None:
+            if not (x := cls._parse_target(left, True)): return None
+            return x[0], x[0], True, cls._parse_occ(x[1]), cls._HEADER_LABELS[op]
+        if not (x := cls._parse_target(left, True)) or not (y := cls._parse_target(right, False)): return None
+        return x[0], y[0], False, cls._parse_occ(y[1]) or cls._parse_occ(x[1]), cls._HEADER_LABELS[op]
 
     @classmethod
     def _parse_header_line(cls, line: str) -> tuple[str, str, str, bool, int | None, str] | None:
         for op, rx, _ in cls._HEADER_SPECS:
-            if m := rx.match(line): return (op, *cls._parse_header_match(op, m))
+            if (m := rx.match(line)) and (body := cls._parse_header_body(op, m.group('rest') or '')): return (op, *body)
         return None
 
     @classmethod
@@ -421,11 +446,11 @@ class EditService:
             while True:
                 op, hdr = self._next_hdr(section, pos)
                 if not hdr: break
-                if not (f := self._parse_fence_from(section, hdr.end())):
+                if not (f := self._parse_fence_from(section, hdr.end())) or not (h := self._parse_header_line(hdr.group(0))):
                     pos = hdr.end()
                     continue
-                x, y, single, n, _ = self._parse_header_match(op or 'replace', hdr)
-                replaces.append(ReplaceBlock(x=x, y=y, single=single, occ=n, new=f[1], lang=(f[0] or '').strip(), op=op or 'replace'))
+                op, x, y, single, n, _ = h
+                replaces.append(ReplaceBlock(x=x, y=y, single=single, occ=n, new=f[1], lang=(f[0] or '').strip(), op=op))
                 pos = f[2]
             full = None if replaces else self._parse_full_edit_fence(section)
             cuts = [x.start() for x in [self._REPLACE_HDR_RE.search(section), self._INSERT_AFTER_HDR_RE.search(section), self._INSERT_BEFORE_HDR_RE.search(section), self._FENCE_OPEN_RE.search(section)] if x]
@@ -800,9 +825,15 @@ class ChatClient:
         ok = self.edit_service.rollback_for_assistant(assistant_id)
         self.edited_files, self.edit_transactions = self.edit_service.edited_files, self.edit_service.transactions
         return ok
+    
+    @staticmethod
+    def _reasoning_options(model: str, reasoning: str) -> dict[str, Any]:
+        if reasoning == 'none': return {}
+        if model == 'anthropic/claude-4.7-opus': return {'extra_body': {'reasoning': {'enabled': True}, 'verbosity': {'minimal': 'low'}.get(reasoning, reasoning)}}
+        return {'extra_body': {'reasoning': {'effort': reasoning if reasoning in {'minimal', 'low', 'medium', 'high'} else 'high'}}}
 
     def stream(self, messages: list[dict[str, str]], model: str = DEFAULT_MODEL, reasoning: str = DEFAULT_REASONING) -> AsyncGenerator[str | ReasoningEvent, None]:
-        data = {'model': model, 'messages': messages, 'max_tokens': 50000, 'temperature': 0.4, 'stream': True, 'reasoning_effort': reasoning}
+        data = {'model': model, 'messages': messages, 'max_tokens': 50000, 'temperature': 0.6, 'stream': True, **self._reasoning_options(model, reasoning)}
 
         async def gen():
             full = ''
