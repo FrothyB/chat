@@ -13,12 +13,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULT_MODEL = 'openai/gpt-5.4'
 DEFAULT_REASONING = 'medium'
-MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.4', 'openai/gpt-5.4-pro', 'openai/gpt-5.4-mini', 'anthropic/claude-4.7-opus', 'x-ai/grok-4.20-multi-agent-beta']
+MODELS = ['google/gemini-3.1-pro-preview', 'openai/gpt-5.4', 'openai/gpt-5.4-pro', 'openai/gpt-5.4-mini', 'anthropic/claude-4.7-opus', 'moonshotai/kimi-k2.6']
 REASONING_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh']
 MAX_ATTACHMENT_BYTES = 500 * 1024
 
 FILE_LIKE_EXTS = {'.py', '.pyw', '.ipynb', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp', '.hh', '.hxx', '.go', '.rs', '.cs', '.java', '.html', '.svelte', '.htm', '.css', '.md', '.markdown', '.txt', '.rst', '.json', '.yaml', '.yml', '.toml', '.sql', '.sh', '.bash', '.zsh', '.bat', '.ps1'}
-ATTACHMENTS_MARKER = '\n\nAttached attachments:\n'
+ATTACHMENTS_MARKER = '\n\Attachments:\n'
 LANG_BY_EXT = {
     '.py': 'python', '.pyw': 'python', '.ipynb': 'json', '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
     '.ts': 'typescript', '.tsx': 'tsx', '.c': 'c', '.cc': 'cpp', '.cpp': 'cpp', '.cxx': 'cpp', '.h': 'c', '.hpp': 'cpp',
@@ -126,13 +126,13 @@ class ReasoningEvent:
 
 @dataclass(slots=True)
 class ReplaceBlock:
-    x: str
-    y: str
-    single: bool = False
-    occ: int | None = None
+    op: Literal['replace', 'insert_after', 'insert_before']
+    start1: str = ''
+    start2: str = ''
+    end: str = ''
+    anchor: str = ''
     new: str = ''
     lang: str = ''
-    op: str = 'replace'
 
 
 @dataclass(slots=True)
@@ -144,12 +144,36 @@ class EditDirective:
     full_new: str | None = None
 
 
+@dataclass(slots=True)
+class DisplayCommandState:
+    op: Literal['replace', 'insert_after', 'insert_before']
+    filename: str
+    phase: Literal['start1', 'start2', 'end', 'anchor', 'new_fence', 'stream_new']
+    raw: list[str] = field(default_factory=list)
+    start1: str = ''
+    start2: str = ''
+    end: str = ''
+    anchor: str = ''
+
+
 class AttachmentService:
     @staticmethod
     def normalize_url(u: str) -> str: return _normalize_url(u)
 
     @staticmethod
     def looks_like_url(v: str) -> bool: return _looks_like_url(v)
+
+    @staticmethod
+    def _notebook_content(p: Path) -> str:
+        nb = json.loads(p.read_text(encoding='utf-8'))
+        cells = []
+        for cell in nb.get('cells', []):
+            if cell.get('cell_type') != 'code': continue
+            src = cell.get('source', [])
+            if isinstance(src, str): src = [src]
+            if not isinstance(src, list): continue
+            cells.append({'source': [s if isinstance(s, str) else str(s) for s in src]})
+        return 'Extracted only source from notebook; edit cell-by-cell if needed.\n' + json.dumps({'cells': cells}, indent=2)
 
     @staticmethod
     def validate_file_attachment(path: str, base_path: str | None = None) -> str | None:
@@ -159,6 +183,7 @@ class AttachmentService:
         if p.is_absolute(): return f'Attachment must be relative: {rel}'
         q = (base / p).resolve()
         if not q.is_relative_to(base) or not q.is_file(): return f'Not a file: {rel}'
+        if q.suffix.lower() == '.ipynb': return f'Attachment exceeds 500KB after pruning notebook contents: {rel}' if len(AttachmentService._notebook_content(q).encode('utf-8')) > MAX_ATTACHMENT_BYTES else None
         return f'Attachment exceeds 500KB: {rel}' if q.stat().st_size > MAX_ATTACHMENT_BYTES else None
 
     @staticmethod
@@ -242,20 +267,16 @@ class AttachmentService:
                 if not p.is_file():
                     out.append(f'### {name}\nError: not a file\n')
                     continue
-                if p.stat().st_size > MAX_ATTACHMENT_BYTES:
-                    out.append(f'### {name}\nError: attachment exceeds 500KB\n')
-                    continue
-                if p.name.endswith('.ipynb'):
-                    nb = json.loads(p.read_text(encoding='utf-8'))
-                    cells = []
-                    for cell in nb.get('cells', []):
-                        if cell.get('cell_type') != 'code': continue
-                        src = cell.get('source', [])
-                        if isinstance(src, str): src = [src]
-                        if not isinstance(src, list): continue
-                        cells.append({'source': [s if isinstance(s, str) else str(s) for s in src]})
-                    out.append(f'### {name}\nExtracted only source from notebook; edit cell-by-cell if needed.\n{json.dumps({"cells": cells}, indent=2)}\n')
+                if p.suffix.lower() == '.ipynb':
+                    content = AttachmentService._notebook_content(p)
+                    if len(content.encode('utf-8')) > MAX_ATTACHMENT_BYTES:
+                        out.append(f'### {name}\nError: attachment exceeds 500KB after pruning notebook contents\n')
+                        continue
+                    out.append(f'### {name}\n{content}\n')
                 else:
+                    if p.stat().st_size > MAX_ATTACHMENT_BYTES:
+                        out.append(f'### {name}\nError: attachment exceeds 500KB\n')
+                        continue
                     out.append(f'### {name}\n{p.read_text(encoding="utf-8")}\n')
             except Exception as e:
                 out.append(f'### {name}\nError: {e}\n')
@@ -277,16 +298,13 @@ def read_files(file_paths: list[str]) -> str:
 
 
 class EditService:
-    _EDIT_HDR_RE = re.compile(r'(?mi)^\s*#+\s*edit\s+(.+?)\s*$')
-    _REPLACE_HDR_RE = re.compile(r'(?mi)^\s*#+\s*replace\b(?P<rest>.*)$')
-    _INSERT_AFTER_HDR_RE = re.compile(r'(?mi)^\s*#+\s*insert\s+after\b(?P<rest>.*)$')
-    _INSERT_BEFORE_HDR_RE = re.compile(r'(?mi)^\s*#+\s*insert\s+before\b(?P<rest>.*)$')
-    _FENCE_OPEN_RE = re.compile(r'(?m)^\s*```[ \t]*([^\n`]*)\s*$')
-    _FENCE_CLOSE_RE = re.compile(r'(?m)^\s*```\s*$')
-    _TARGET_RE = re.compile(r'(`+)([^\n`]*)\1')
-    _OCC_RE = re.compile(r'(\d+)\s*$')
-    _HEADER_SPECS = (('replace', _REPLACE_HDR_RE, 'Replace'), ('insert_after', _INSERT_AFTER_HDR_RE, 'Insert After'), ('insert_before', _INSERT_BEFORE_HDR_RE, 'Insert Before'))
-    _HEADER_LABELS = {op: label for op, _, label in _HEADER_SPECS}
+    _EDIT_HDR_RE = re.compile(r'^\s*###\s*Edit\s+(.+?)\s*$', re.IGNORECASE)
+    _COMMAND_HDR_RE = re.compile(r'^\s*####\s*(Replace|Insert After|Insert Before|Write)\s*$', re.IGNORECASE)
+    _KEY_RE = re.compile(r'^\s*(StartAnchor1|StartAnchor2|EndAnchor|Anchor)\|(.*)$')
+    _FENCE_OPEN_RE = re.compile(r'^\s*```[ \t]*([^\n`]*)\s*$')
+    _FENCE_CLOSE_RE = re.compile(r'^\s*```\s*$')
+    _OPS = {'replace': 'replace', 'insert after': 'insert_after', 'insert before': 'insert_before', 'write': 'write'}
+    _LABELS = {'replace': 'Replace', 'insert_after': 'Insert After', 'insert_before': 'Insert Before'}
 
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
@@ -313,73 +331,55 @@ class EditService:
         return 0 if t == '' else t.count('\n') + 1
 
     @classmethod
-    def _parse_fence_from(cls, text: str, pos: int) -> tuple[str, str, int] | None:
-        if not (m := cls._FENCE_OPEN_RE.search(text, pos)): return None
-        if not (m2 := cls._FENCE_CLOSE_RE.search(text, m.end())): return None
-        body = text[m.end():m2.start()]
-        return (m.group(1) or '').strip(), body[1:] if body.startswith('\n') else body, m2.end()
-    @classmethod
-    def _parse_full_edit_fence(cls, text: str) -> tuple[str, str] | None:
-        text = cls._norm_newlines(text).strip()
-        if not text or any(rx.search(text) for _, rx, _ in cls._HEADER_SPECS): return None
-        if not (m := cls._FENCE_OPEN_RE.search(text)) or not (f := cls._parse_fence_from(text, m.start())) or text[f[2]:].strip(): return None
-        return text[:m.start()].strip(), f[1]
+    def _split_lines(cls, s: str) -> list[str]:
+        t, xs = cls._norm_newlines(s), cls._norm_newlines(s).split('\n')
+        return xs[:-1] if t.endswith('\n') else xs
+
+    @staticmethod
+    def _skip_blank(lines: list[str], i: int) -> int:
+        while i < len(lines) and lines[i].strip() == '': i += 1
+        return i
 
     @classmethod
-    def _split_header_range(cls, s: str) -> tuple[str, str | None]:
-        spans = [m.span() for m in cls._TARGET_RE.finditer(s)]
-        if len(spans) < 2: return s, None
-        for i, c in enumerate(s):
-            if c != '-' or any(a <= i < b for a, b in spans) or not any(b <= i for a, b in spans) or not any(a > i for a, b in spans): continue
-            return s[:i], s[i + 1:]
-        return s, None
+    def _read_fence(cls, lines: list[str], i: int) -> tuple[str, str, int] | None:
+        if i >= len(lines) or not (m := cls._FENCE_OPEN_RE.match(lines[i])): return None
+        j = i + 1
+        while j < len(lines) and not cls._FENCE_CLOSE_RE.match(lines[j]): j += 1
+        if j >= len(lines): return None
+        return (m.group(1) or '').strip(), '\n'.join(lines[i + 1:j]), j + 1
 
     @classmethod
-    def _parse_target(cls, s: str, take_last: bool) -> tuple[str, str] | None:
-        if not (ms := list(cls._TARGET_RE.finditer(s))): return None
-        m = ms[-1] if take_last else ms[0]
-        return m.group(2), s[m.end():]
-
-    @classmethod
-    def _parse_occ(cls, s: str) -> int | None:
-        return int(m.group(1)) if (m := cls._OCC_RE.search(s or '')) else None
-
-    @classmethod
-    def _parse_header_body(cls, op: str, rest: str) -> tuple[str, str, bool, int | None, str] | None:
-        left, right = cls._split_header_range(rest or '')
-        if right is None:
-            if not (x := cls._parse_target(left, True)): return None
-            return x[0], x[0], True, cls._parse_occ(x[1]), cls._HEADER_LABELS[op]
-        if not (x := cls._parse_target(left, True)) or not (y := cls._parse_target(right, False)): return None
-        return x[0], y[0], False, cls._parse_occ(y[1]) or cls._parse_occ(x[1]), cls._HEADER_LABELS[op]
-
-    @classmethod
-    def _parse_header_line(cls, line: str) -> tuple[str, str, str, bool, int | None, str] | None:
-        for op, rx, _ in cls._HEADER_SPECS:
-            if (m := rx.match(line)) and (body := cls._parse_header_body(op, m.group('rest') or '')): return (op, *body)
-        return None
-
-    @classmethod
-    def _next_hdr(cls, section: str, at: int) -> tuple[str | None, re.Match | None]:
-        xs = [(op, rx.search(section, at)) for op, rx, _ in cls._HEADER_SPECS]
-        xs = [(op, m) for op, m in xs if m]
-        return min(xs, key=lambda t: t[1].start()) if xs else (None, None)
-
-    @classmethod
-    def _find_anchor_span(cls, lines: list[str], x: str, y: str, single: bool = False, occ: int | None = None) -> tuple[int, int] | None:
-        if not lines: return None
+    def _find_replace_span(cls, lines: list[str], a1: str, a2: str, z: str) -> tuple[int, int] | None:
+        if len(lines) < 2: return None
 
         def run(norm) -> tuple[int, int] | None:
-            vals, xv, yv = [norm(v) for v in lines], norm(x), norm(y)
-            xs = [i for i, v in enumerate(vals) if v == xv]
-            if occ is not None: xs = [xs[occ - 1]] if 0 < occ <= len(xs) else []
-            if single: return (xs[0] + 1, xs[0] + 1) if len(xs) == 1 else None
-            ys = [i for i, v in enumerate(vals) if v == yv]
-            cands = [(i, next((j for j in ys if j >= i), -1)) for i in xs]
-            cands = [(i, j) for i, j in cands if j >= 0]
+            vals, x1, x2, y = [norm(v) for v in lines], norm(a1), norm(a2), norm(z)
+            cands = []
+            for i in range(len(vals) - 1):
+                if vals[i] != x1 or vals[i + 1] != x2: continue
+                for j in range(i + 1, len(vals)):
+                    if vals[j] == y:
+                        cands.append((i, j))
+                        break
             return (cands[0][0] + 1, cands[0][1] + 1) if len(cands) == 1 else None
 
-        return run(lambda s: (s or '').rstrip()) or run(lambda s: (s or '').strip())
+        return run(lambda s: s) or run(lambda s: (s or '').rstrip())
+    
+    @classmethod
+    def _find_block_span(cls, lines: list[str], block: str) -> tuple[int, int] | None:
+        if not lines or block == '': return None
+        want = cls._split_lines(block)
+        if not want: return None
+
+        def run(norm) -> tuple[int, int] | None:
+            vals, xs, n = [norm(v) for v in lines], [norm(v) for v in want], len(want)
+            cands = [i for i in range(len(vals) - n + 1) if vals[i:i + n] == xs]
+            return (cands[0] + 1, cands[0] + n) if len(cands) == 1 else None
+
+        return run(lambda s: s) or run(lambda s: (s or '').rstrip())
+
+    def _match_span(self, lines: list[str], blk: ReplaceBlock) -> tuple[int, int] | None:
+        return self._find_replace_span(lines, blk.start1, blk.start2, blk.end) if blk.op == 'replace' and not blk.anchor else self._find_block_span(lines, blk.anchor)
 
     def _resolve_path(self, filename: str, ctx_files: list[str], create_if_missing: bool = False) -> str | None:
         raw = (filename or '').strip().replace('`', '').replace('\\', '/')
@@ -421,41 +421,81 @@ class EditService:
     def _read_file_lines(self, rel: str) -> list[str] | None:
         p = (self.base_dir / Path(rel)).resolve()
         if not p.is_relative_to(self.base_dir) or not p.exists(): return None
-        norm, xs = self._norm_newlines(p.read_text(encoding='utf-8')), self._norm_newlines(p.read_text(encoding='utf-8')).split('\n')
-        return xs[:-1] if norm.endswith('\n') else xs
+        return self._split_lines(p.read_text(encoding='utf-8'))
 
     def _code_lang(self, rel: str) -> str: return LANG_BY_EXT.get(Path(rel).suffix.lower(), Path(rel).suffix.lower().lstrip('.'))
 
-    def render_edit_header(self, filename: str, op: str, x: str, y: str, single: bool, occ: int | None, label: str, ctx_files: list[str]) -> str | None:
+    def render_edit_header(self, filename: str, blk: ReplaceBlock, ctx_files: list[str]) -> str | None:
         rel = self._resolve_path(filename, ctx_files, create_if_missing=False)
-        if not rel or not (lines := self._read_file_lines(rel)) or not (span := self._find_anchor_span(lines, x, y, single=single, occ=occ)): return None
+        if not rel or not (lines := self._read_file_lines(rel)) or not (span := self._match_span(lines, blk)): return None
         a, b = span
-        body, lang, tail = '\n'.join(lines[a - 1:b]), self._code_lang(rel), '#### WITH' if op == 'replace' else '#### ADD'
+        body, lang, tail = '\n'.join(lines[a - 1:b]), self._code_lang(rel), '#### WITH' if blk.op == 'replace' else '#### ADD'
         fence = f'```{lang}\n{body}\n```' if body else f'```{lang}\n```'
-        return f'#### {label} {a}-{b}\n{fence}\n{tail}'
+        return f'#### {self._LABELS[blk.op]} {a}-{b}\n{fence}\n{tail}'
 
     def new_display_renderer(self, ctx_files: list[str] | None = None) -> 'DisplayRenderer':
         return DisplayRenderer(self, ctx_files or [])
 
+    def _parse_section(self, filename: str, lines: list[str]) -> EditDirective | None:
+        i = 0
+        while i < len(lines) and not self._COMMAND_HDR_RE.match(lines[i]): i += 1
+        explanation, replaces, full_new, j = '\n'.join(lines[:i]).strip(), [], None, i
+
+        while j < len(lines):
+            j = self._skip_blank(lines, j)
+            if j >= len(lines): break
+            if not (m := self._COMMAND_HDR_RE.match(lines[j])):
+                j += 1
+                continue
+            op, k = self._OPS[m.group(1).strip().lower()], self._skip_blank(lines, j + 1)
+            try:
+                if op == 'write':
+                    if replaces or full_new is not None or not (f := self._read_fence(lines, k)): raise ValueError('invalid write')
+                    full_new, j = f[1], f[2]
+                    continue
+                if full_new is not None: raise ValueError('cannot mix write with edits')
+                if op == 'replace':
+                    k = self._skip_blank(lines, k)
+                    if k >= len(lines) or not (km := self._KEY_RE.match(lines[k])): raise ValueError('missing anchor')
+                    if km.group(1) == 'Anchor':
+                        if km.group(2) == '': raise ValueError('missing Anchor|value')
+                        k = self._skip_blank(lines, k + 1)
+                        if not (f := self._read_fence(lines, k)): raise ValueError('missing fence')
+                        replaces.append(ReplaceBlock(op='replace', anchor=km.group(2), new=f[1], lang=f[0]))
+                        j = f[2]
+                        continue
+                    if km.group(1) != 'StartAnchor1': raise ValueError('missing StartAnchor1')
+                    vals, k = {'StartAnchor1': km.group(2)}, k + 1
+                    for key in ('StartAnchor2', 'EndAnchor'):
+                        k = self._skip_blank(lines, k)
+                        if k >= len(lines) or not (km := self._KEY_RE.match(lines[k])) or km.group(1) != key: raise ValueError(f'missing {key}')
+                        vals[key], k = km.group(2), k + 1
+                    k = self._skip_blank(lines, k)
+                    if not (f := self._read_fence(lines, k)): raise ValueError('missing fence')
+                    replaces.append(ReplaceBlock(op='replace', start1=vals['StartAnchor1'], start2=vals['StartAnchor2'], end=vals['EndAnchor'], new=f[1], lang=f[0]))
+                    j = f[2]
+                    continue
+                k = self._skip_blank(lines, k)
+                if k >= len(lines) or not (km := self._KEY_RE.match(lines[k])) or km.group(1) != 'Anchor' or km.group(2) == '': raise ValueError('missing Anchor|value')
+                k = self._skip_blank(lines, k + 1)
+                if not (f := self._read_fence(lines, k)): raise ValueError('missing fence')
+                replaces.append(ReplaceBlock(op=op, anchor=km.group(2), new=f[1], lang=f[0]))
+                j = f[2]
+            except Exception:
+                j += 1
+        return EditDirective(kind='EDIT', filename=filename, explanation=explanation, replaces=replaces, full_new=full_new) if replaces or full_new is not None else None
+
     def parse_edit_markdown(self, md: str) -> list[EditDirective]:
         if not md: return []
-        text, edits, out = self._norm_newlines(md), list(self._EDIT_HDR_RE.finditer(self._norm_newlines(md))), []
-        for i, m in enumerate(edits):
-            filename, section = (m.group(1) or '').strip().replace('`', ''), text[m.end():(edits[i + 1].start() if i + 1 < len(edits) else len(text))].strip()
-            replaces, pos = [], 0
-            while True:
-                op, hdr = self._next_hdr(section, pos)
-                if not hdr: break
-                if not (f := self._parse_fence_from(section, hdr.end())) or not (h := self._parse_header_line(hdr.group(0))):
-                    pos = hdr.end()
-                    continue
-                op, x, y, single, n, _ = h
-                replaces.append(ReplaceBlock(x=x, y=y, single=single, occ=n, new=f[1], lang=(f[0] or '').strip(), op=op))
-                pos = f[2]
-            full = None if replaces else self._parse_full_edit_fence(section)
-            cuts = [x.start() for x in [self._REPLACE_HDR_RE.search(section), self._INSERT_AFTER_HDR_RE.search(section), self._INSERT_BEFORE_HDR_RE.search(section), self._FENCE_OPEN_RE.search(section)] if x]
-            expl = full[0] if full else section[:min(cuts)].strip() if cuts else section.strip()
-            if replaces or full: out.append(EditDirective(kind='EDIT', filename=filename, explanation=expl, replaces=replaces, full_new=(full[1] if full else None)))
+        lines, out, i = self._split_lines(md), [], 0
+        while i < len(lines):
+            if not (m := self._EDIT_HDR_RE.match(lines[i])):
+                i += 1
+                continue
+            filename, j = (m.group(1) or '').strip().replace('`', ''), i + 1
+            while j < len(lines) and not self._EDIT_HDR_RE.match(lines[j]): j += 1
+            if d := self._parse_section(filename, lines[i + 1:j]): out.append(d)
+            i = j
         return out
 
     def render_for_display(self, md: str, ctx_files: list[str] | None = None) -> str:
@@ -475,8 +515,8 @@ class EditService:
             tx['files'][rel] = p.read_text(encoding='utf-8') if p.exists() else None
 
         def fmt_cmd(rel: str, blk: ReplaceBlock) -> str:
-            op, core = {'replace': 'Replace', 'insert_after': 'Insert After', 'insert_before': 'Insert Before'}.get(blk.op, blk.op), f'`{blk.x}`' if blk.single else f'`{blk.x}`-`{blk.y}`'
-            return f'{rel}: {op} {core}' + (f' {blk.occ}' if blk.occ else '')
+            if blk.op == 'replace': return f'{rel}: Replace `{blk.anchor}`' if blk.anchor else f'{rel}: Replace `{blk.start1}` + `{blk.start2}` ... `{blk.end}`'
+            return f'{rel}: {self._LABELS[blk.op]} `{blk.anchor}`'
 
         def cur_loc(span: tuple[int, int], op: str) -> tuple[int, int]:
             a, b = span
@@ -512,8 +552,6 @@ class EditService:
                     if v >= i0: m[j] = v + k
                 elif v > i0:
                     m[j] = v + k
-            op, core = {'replace': 'Replace', 'insert_after': 'Insert After', 'insert_before': 'Insert Before'}.get(blk.op, blk.op), f'`{blk.x}`' if blk.single else f'`{blk.x}`-`{blk.y}`'
-            return f'{rel}: {op} {core}' + (f' {blk.occ}' if blk.occ else '')
 
         for d in directives:
             try:
@@ -541,11 +579,11 @@ class EditService:
                     results.append(EditEvent('error', Path(rel).name, 'File does not exist', rel))
                     continue
                 if not d.replaces:
-                    results.append(EditEvent('error', Path(rel).name, 'No replace blocks found', rel))
+                    results.append(EditEvent('error', Path(rel).name, 'No edit blocks found', rel))
                     continue
 
-                original, eol = p.read_text(encoding='utf-8'), '\r\n' if '\r\n' in p.read_text(encoding='utf-8') else '\n'
-                norm, had_final_nl = self._norm_newlines(original), self._norm_newlines(original).endswith('\n')
+                original = p.read_text(encoding='utf-8')
+                eol, norm, had_final_nl = ('\r\n' if '\r\n' in original else '\n'), self._norm_newlines(original), self._norm_newlines(original).endswith('\n')
                 lines = norm.split('\n')
                 if had_final_nl: lines = lines[:-1]
 
@@ -553,10 +591,10 @@ class EditService:
                 for blk in d.replaces:
                     new_norm = self._norm_newlines(blk.new).rstrip('\n')
                     new_lines = [] if new_norm == '' else new_norm.split('\n')
-                    if (span := self._find_anchor_span(lines, blk.x, blk.y, single=blk.single, occ=blk.occ)) and (loc := orig_loc(orig_pos, span, blk.op)):
+                    if (span := self._match_span(lines, blk)) and (loc := orig_loc(orig_pos, span, blk.op)):
                         i0, i1, s, t = loc
                         from_orig = True
-                    elif span := self._find_anchor_span(updated_lines, blk.x, blk.y, single=blk.single, occ=blk.occ):
+                    elif span := self._match_span(updated_lines, blk):
                         i0, i1 = cur_loc(span, blk.op)
                         from_orig = False
                     else:
@@ -605,9 +643,10 @@ class EditService:
             if rel not in changed: continue
             prev = tx.get('files', {}).get(rel, None)
             try:
-                if prev is None: 
+                if prev is None:
                     with contextlib.suppress(FileNotFoundError): p.unlink()
-                else: self._atomic_write(p, prev)
+                else:
+                    self._atomic_write(p, prev)
             except Exception:
                 return False
             changed.remove(rel)
@@ -632,7 +671,8 @@ class EditService:
                     prev = tx.get('files', {}).get(rel, None)
                     if prev is None:
                         with contextlib.suppress(FileNotFoundError): p.unlink()
-                    else: self._atomic_write(p, prev)
+                    else:
+                        self._atomic_write(p, prev)
                     restored.append(rel)
         except Exception as e:
             try:
@@ -641,7 +681,8 @@ class EditService:
                     if not p.is_relative_to(self.base_dir): raise RuntimeError(f'Path escapes base dir during recovery: {rel}')
                     if cur is None:
                         with contextlib.suppress(FileNotFoundError): p.unlink()
-                    else: self._atomic_write(p, cur)
+                    else:
+                        self._atomic_write(p, cur)
             except Exception as e2:
                 raise RuntimeError(f'Rollback failed for assistant {assistant_id}: {e}; recovery failed: {e2}') from e2
             raise RuntimeError(f'Rollback failed for assistant {assistant_id}: {e}') from e
@@ -656,6 +697,7 @@ class DisplayRenderer:
         self.service = service
         self.ctx_files = [p for p in ctx_files if p]
         self.current_file = ''
+        self.cmd: DisplayCommandState | None = None
         self.in_fence = False
         self.tail = ''
         self.tail_emitted = 0
@@ -663,38 +705,114 @@ class DisplayRenderer:
     @staticmethod
     def _candidate_mode(s: str) -> str:
         t = s.lstrip()
-        return 'unknown' if t == '' else 'header' if t.startswith('#') else 'fence' if t.startswith('`') else 'ordinary'
+        return 'unknown' if t == '' else 'header' if t.startswith('#') else 'fence' if t.startswith('```') else 'ordinary'
+
+    def _streaming_command_fence(self) -> bool:
+        return self.cmd is not None and self.cmd.phase == 'stream_new'
 
     def _append_partial(self, frag: str) -> str:
         if not frag: return ''
         self.tail += frag
-        if self.in_fence or self._candidate_mode(self.tail) == 'ordinary':
+        if self.in_fence or self._streaming_command_fence() or (self.cmd is None and self._candidate_mode(self.tail) == 'ordinary'):
             out = self.tail[self.tail_emitted:]
             self.tail_emitted = len(self.tail)
             return out
         return ''
 
+    @staticmethod
+    def _join_raw(lines: list[str], final_newline: bool) -> str:
+        return ('' if not lines else '\n'.join(lines)) + ('\n' if lines and final_newline else '')
+
+    def _flush_raw(self, final_newline: bool) -> str:
+        out, self.cmd = self._join_raw(self.cmd.raw if self.cmd else [], final_newline), None
+        return out
+
+    def _render(self) -> str:
+        if not self.cmd: return ''
+        c = self.cmd
+        blk = ReplaceBlock(op=c.op, start1=c.start1, start2=c.start2, end=c.end, anchor=c.anchor)
+        if not (text := self.service.render_edit_header(c.filename, blk, self.ctx_files)): return self._flush_raw(True)
+        c.raw, c.phase = [], 'new_fence'
+        return text + '\n'
+
+    def _begin_command(self, line: str) -> str:
+        if not self.current_file or not (m := self.service._COMMAND_HDR_RE.match(line)): return line + '\n'
+        op = self.service._OPS[m.group(1).strip().lower()]
+        if op == 'write': return line + '\n'
+        self.cmd = DisplayCommandState(op=op, filename=self.current_file, phase='start1' if op == 'replace' else 'anchor', raw=[line])
+        return ''
+
+    def _finish_command_line(self, line: str, emitted: int = 0) -> str:
+        if not self.cmd: return line + '\n'
+        c = self.cmd
+        if c.phase == 'stream_new':
+            if self.service._FENCE_CLOSE_RE.match(line): self.cmd = None
+            return line[emitted:] + '\n'
+        c.raw.append(line)
+        if c.op == 'replace':
+            if c.phase == 'start1':
+                if line.strip() == '': return ''
+                if not (m := self.service._KEY_RE.match(line)): return self._flush_raw(True)
+                if m.group(1) == 'Anchor' and m.group(2) != '':
+                    c.anchor = m.group(2)
+                    return self._render()
+                if m.group(1) != 'StartAnchor1': return self._flush_raw(True)
+                c.start1, c.phase = m.group(2), 'start2'
+                return ''
+            if c.phase == 'start2':
+                if line.strip() == '': return ''
+                if not (m := self.service._KEY_RE.match(line)) or m.group(1) != 'StartAnchor2': return self._flush_raw(True)
+                c.start2, c.phase = m.group(2), 'end'
+                return ''
+            if c.phase == 'end':
+                if line.strip() == '': return ''
+                if not (m := self.service._KEY_RE.match(line)) or m.group(1) != 'EndAnchor': return self._flush_raw(True)
+                c.end = m.group(2)
+                return self._render()
+        else:
+            if c.phase == 'anchor':
+                if line.strip() == '': return ''
+                if not (m := self.service._KEY_RE.match(line)) or m.group(1) != 'Anchor' or m.group(2) == '': return self._flush_raw(True)
+                c.anchor = m.group(2)
+                return self._render()
+        if c.phase == 'new_fence':
+            if line.strip() == '': return ''
+            if self.service._FENCE_OPEN_RE.match(line):
+                c.raw, c.phase = [], 'stream_new'
+                return line + '\n'
+            self.cmd = None
+            return line + '\n'
+        self.cmd = None
+        return line + '\n'
+
     def _finish_complete_line(self) -> str:
         line, emitted = self.tail, self.tail_emitted
         self.tail, self.tail_emitted = '', 0
+        if self.cmd: return self._finish_command_line(line, emitted)
         if self.in_fence:
             if self.service._FENCE_CLOSE_RE.match(line): self.in_fence = False
             return line[emitted:] + '\n'
-        text = line
-        if m := self.service._EDIT_HDR_RE.match(line): self.current_file = (m.group(1) or '').strip().replace('`', '')
-        elif self.current_file and (h := self.service._parse_header_line(line)): text = self.service.render_edit_header(self.current_file, *h, self.ctx_files) or line
-        if self.service._FENCE_OPEN_RE.match(line): self.in_fence = True
-        return (text if text != line or emitted == 0 else line[emitted:]) + '\n'
+        if m := self.service._EDIT_HDR_RE.match(line):
+            self.current_file = (m.group(1) or '').strip().replace('`', '')
+            return line[emitted:] + '\n'
+        if self.service._FENCE_OPEN_RE.match(line):
+            self.in_fence = True
+            return line[emitted:] + '\n'
+        return self._begin_command(line) if emitted == 0 else line[emitted:] + '\n'
 
     def _finish_tail(self) -> str:
         line, emitted = self.tail, self.tail_emitted
         self.tail, self.tail_emitted = '', 0
-        if line == '': return ''
+        if line == '': return self._flush_raw(False) if self.cmd and self.cmd.raw else ''
+        if self.cmd:
+            if self._streaming_command_fence(): return line[emitted:]
+            self.cmd.raw.append(line)
+            return self._flush_raw(False)
         if self.in_fence: return line[emitted:]
-        text = line
-        if m := self.service._EDIT_HDR_RE.match(line): self.current_file = (m.group(1) or '').strip().replace('`', '')
-        elif self.current_file and (h := self.service._parse_header_line(line)): text = self.service.render_edit_header(self.current_file, *h, self.ctx_files) or line
-        return text if text != line or emitted == 0 else line[emitted:]
+        if m := self.service._EDIT_HDR_RE.match(line):
+            self.current_file = (m.group(1) or '').strip().replace('`', '')
+            return line[emitted:] if emitted else line
+        return line[emitted:] if emitted else line
 
     def feed(self, chunk: str) -> str:
         if not chunk: return ''
@@ -825,7 +943,7 @@ class ChatClient:
         ok = self.edit_service.rollback_for_assistant(assistant_id)
         self.edited_files, self.edit_transactions = self.edit_service.edited_files, self.edit_service.transactions
         return ok
-    
+
     @staticmethod
     def _reasoning_options(model: str, reasoning: str) -> dict[str, Any]:
         if reasoning == 'none': return {}

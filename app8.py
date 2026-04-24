@@ -8,6 +8,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
+import zstandard as zstd
+from starlette.datastructures import MutableHeaders
 
 from nicegui import app, ui
 
@@ -892,9 +894,34 @@ async def main_page():
     await ui.context.client.connected()
     ChatPageController.load(app.storage.tab).mount()
 
+class ZstdMiddleware:
+    def __init__(self, app, *, level=10, minimum_size=500):
+        self.app, self.minimum_size, self.c = app, minimum_size, zstd.ZstdCompressor(level=level)
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http': return await self.app(scope, receive, send)
+        if b'zstd' not in dict(scope['headers']).get(b'accept-encoding', b''): return await self.app(scope, receive, send)
+
+        start, chunks = None, []
+        async def capture(message):
+            nonlocal start
+            if message['type'] == 'http.response.start': start = message
+            elif message['type'] == 'http.response.body': chunks.append(message.get('body', b''))
+
+        await self.app(scope, receive, capture)
+        body = b''.join(chunks)
+        headers = MutableHeaders(raw=start['headers'])
+        if len(body) >= self.minimum_size and 'content-encoding' not in headers:
+            body = self.c.compress(body)
+            headers['Content-Encoding'] = 'zstd'
+            headers['Content-Length'] = str(len(body))
+            headers['Vary'] = 'Accept-Encoding' if 'vary' not in headers else f"{headers['vary']}, Accept-Encoding"
+        await send({**start, 'headers': headers.raw})
+        await send({'type': 'http.response.body', 'body': body, 'more_body': False})
+
 
 if __name__ in {'__main__', '__mp_main__'}:
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8888)
     args = parser.parse_args()
-    ui.run(title='AI Chat', port=args.port, host='0.0.0.0', dark=True, show=False, reconnect_timeout=300, ssl_certfile='cert.pem', ssl_keyfile='key.pem')
+    ui.run(title='AI Chat', port=args.port, host='0.0.0.0', dark=True, show=False, reconnect_timeout=300, ssl_certfile='cert.pem', ssl_keyfile='key.pem', gzip_middleware_factory=lambda a: ZstdMiddleware(a, level=9, minimum_size=300))
